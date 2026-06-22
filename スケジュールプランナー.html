@@ -6,7 +6,7 @@
   <title>スケジュールプランナー</title>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js"></script>
   <style>
     body { margin: 0; padding: 0; background: #F5F4F0; }
     #root { min-height: 100vh; }
@@ -262,6 +262,11 @@
       const[editHolMbr,setEditHolMbr]=useState(null);   // 個人休暇編集中のメンバーID
       const[holDateInput,setHolDateInput]=useState("");   // 特定日入力
       const[holBiweeklyInput,setHolBiweeklyInput]=useState(""); // 隔週基準日入力
+      const[showExpModal,setShowExpModal]=useState(false);  // Excel出力モーダル
+      const[expSelIds,setExpSelIds]=useState([]);           // 出力対象プロジェクトID
+      const[expRangeMode,setExpRangeMode]=useState('project'); // 'project'|'custom'
+      const[expStart,setExpStart]=useState('');             // カスタム開始日
+      const[expEnd,setExpEnd]=useState('');                 // カスタム終了日
       const dragIdx=useRef(null);
       const[dragOverIdx,setDragOverIdx]=useState(null);
 
@@ -423,7 +428,7 @@
 </x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
 <style>body{font-family:"Yu Gothic UI","Meiryo","MS PGothic",sans-serif;font-size:10pt;}table{border-collapse:collapse;}td,th{border:1px solid #D1D0CC;padding:2px 3px;font-size:9pt;white-space:nowrap;vertical-align:middle;}</style>
 </head><body><table>${rows}</table></body></html>`;
-        const bom='﻿';
+        const bom='\uFEFF';
         const blob=new Blob([bom+html],{type:'application/vnd.ms-excel;charset=utf-8'});
         const url=URL.createObjectURL(blob);
         const a=document.createElement('a');

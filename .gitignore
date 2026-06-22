@@ -1,0 +1,8 @@
+.DS_Store
+*.bak
+test.html
+*.xlsx
+*.pdf
+*.py
+*.jpg
+*.png
