@@ -222,6 +222,8 @@
 
     // ─── localStorage ─────────────────────────────────────────────────────────
     const STORAGE_KEY='schedulePlanner_v1';
+    const DBX_APP_KEY='55xj8z26vuic1z5';
+    const DBX_FILE='/schedule-data.json';
     function loadSavedData(){
       try{const s=localStorage.getItem(STORAGE_KEY);if(s)return JSON.parse(s);}catch(e){}
       return null;
@@ -267,7 +269,13 @@
       const[expRangeMode,setExpRangeMode]=useState('project'); // 'project'|'custom'
       const[expStart,setExpStart]=useState('');             // カスタム開始日
       const[expEnd,setExpEnd]=useState('');                 // カスタム終了日
+      const[dbxToken,setDbxToken]=useState(()=>localStorage.getItem('dbx_token')||null);
+      const[dbxStatus,setDbxStatus]=useState('idle'); // 'idle'|'syncing'|'ok'|'error'|'conflict'
+      const[dbxLastSync,setDbxLastSync]=useState(()=>localStorage.getItem('dbx_last_sync')||null);
+      const[dbxConflict,setDbxConflict]=useState(null);
       const dragIdx=useRef(null);
+      const dbxTimerRef=useRef(null);
+      const dbxInitRef=useRef(false);
       const[dragOverIdx,setDragOverIdx]=useState(null);
 
       const D=dim(yr,mo);
@@ -453,6 +461,142 @@
         };
         reader.readAsText(file);e.target.value='';
       };
+
+      // ─── Dropbox連携 ────────────────────────────────────────────────────────
+      const connectDropbox=async()=>{
+        const arr=new Uint8Array(32);crypto.getRandomValues(arr);
+        const verifier=btoa(String.fromCharCode(...arr)).replace(/[^a-zA-Z0-9]/g,'');
+        const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier));
+        const challenge=btoa(String.fromCharCode(...new Uint8Array(digest)))
+          .replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
+        sessionStorage.setItem('dbx_v',verifier);
+        const redir=location.origin+location.pathname;
+        location.href='https://www.dropbox.com/oauth2/authorize?'+new URLSearchParams({
+          response_type:'code',client_id:DBX_APP_KEY,redirect_uri:redir,
+          code_challenge:challenge,code_challenge_method:'S256',token_access_type:'offline'});
+      };
+
+      const disconnectDropbox=()=>{
+        ['dbx_token','dbx_refresh','dbx_last_sync'].forEach(k=>localStorage.removeItem(k));
+        setDbxToken(null);setDbxStatus('idle');setDbxLastSync(null);setDbxConflict(null);
+        dbxInitRef.current=false;
+      };
+
+      const dbxRefreshToken=async()=>{
+        const rt=localStorage.getItem('dbx_refresh');if(!rt)return null;
+        const res=await fetch('https://api.dropbox.com/oauth2/token',{
+          method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+          body:new URLSearchParams({grant_type:'refresh_token',refresh_token:rt,client_id:DBX_APP_KEY})
+        });
+        if(!res.ok)return null;
+        const d=await res.json();
+        localStorage.setItem('dbx_token',d.access_token);
+        setDbxToken(d.access_token);
+        return d.access_token;
+      };
+
+      const dbxUpload=async(token,data)=>{
+        const body=JSON.stringify({...data,_savedAt:new Date().toISOString()});
+        const headers=(t)=>({'Authorization':'Bearer '+t,
+          'Dropbox-API-Arg':JSON.stringify({path:DBX_FILE,mode:'overwrite',autorename:false}),
+          'Content-Type':'application/octet-stream'});
+        let res=await fetch('https://content.dropboxapi.com/2/files/upload',
+          {method:'POST',headers:headers(token),body});
+        if(res.status===401){
+          const nt=await dbxRefreshToken();if(!nt)return false;
+          res=await fetch('https://content.dropboxapi.com/2/files/upload',
+            {method:'POST',headers:headers(nt),body});
+        }
+        return res.ok;
+      };
+
+      const dbxDownload=async(token)=>{
+        const headers=(t)=>({'Authorization':'Bearer '+t,
+          'Dropbox-API-Arg':JSON.stringify({path:DBX_FILE})});
+        let res=await fetch('https://content.dropboxapi.com/2/files/download',
+          {method:'POST',headers:headers(token)});
+        if(res.status===401){
+          const nt=await dbxRefreshToken();if(!nt)return undefined;
+          res=await fetch('https://content.dropboxapi.com/2/files/download',
+            {method:'POST',headers:headers(nt)});
+        }
+        if(res.ok)return res.json();
+        if(res.status===409)return null; // ファイル未作成（初回）
+        return undefined; // エラー
+      };
+
+      const loadFromDropbox=(data)=>{
+        setProjects(migrateProjects(data.projects));
+        setMembers(data.members);
+        if(data.nPid)setNPid(data.nPid);
+        if(data.members?.length)_m=Math.max(_m,...data.members.map(m=>m.id));
+        setDbxConflict(null);
+        const n=new Date().toISOString();
+        localStorage.setItem('dbx_last_sync',n);setDbxLastSync(n);setDbxStatus('ok');
+      };
+
+      // OAuthコールバック処理（認証後にURLに?code=が付く）
+      useEffect(()=>{
+        const params=new URLSearchParams(location.search);
+        const code=params.get('code');if(!code)return;
+        const verifier=sessionStorage.getItem('dbx_v');if(!verifier)return;
+        sessionStorage.removeItem('dbx_v');
+        history.replaceState({},'',location.pathname);
+        (async()=>{
+          setDbxStatus('syncing');
+          const res=await fetch('https://api.dropbox.com/oauth2/token',{
+            method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+            body:new URLSearchParams({code,grant_type:'authorization_code',
+              client_id:DBX_APP_KEY,code_verifier:verifier,
+              redirect_uri:location.origin+location.pathname})
+          });
+          if(!res.ok){setDbxStatus('error');return;}
+          const d=await res.json();
+          localStorage.setItem('dbx_token',d.access_token);
+          if(d.refresh_token)localStorage.setItem('dbx_refresh',d.refresh_token);
+          setDbxToken(d.access_token);
+        })();
+      },[]);
+
+      // 初回接続時：Dropboxと差分を確認
+      useEffect(()=>{
+        if(!dbxToken||dbxInitRef.current)return;
+        dbxInitRef.current=true;
+        const localLastSync=localStorage.getItem('dbx_last_sync');
+        (async()=>{
+          setDbxStatus('syncing');
+          const remote=await dbxDownload(dbxToken);
+          if(remote===undefined){setDbxStatus('error');return;}
+          if(!remote){
+            // Dropboxにファイルなし（初回）→ ローカルをアップロード
+            const saved=JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}');
+            const ok=await dbxUpload(dbxToken,saved);
+            if(ok){const n=new Date().toISOString();localStorage.setItem('dbx_last_sync',n);setDbxLastSync(n);setDbxStatus('ok');}
+            else setDbxStatus('error');
+            return;
+          }
+          const remoteAt=new Date(remote._savedAt||0).getTime();
+          const syncAt=localLastSync?new Date(localLastSync).getTime():0;
+          if(remoteAt>syncAt+5000){
+            setDbxConflict(remote);setDbxStatus('conflict'); // 別端末で更新あり
+          } else {
+            const n=new Date().toISOString();localStorage.setItem('dbx_last_sync',n);setDbxLastSync(n);setDbxStatus('ok');
+          }
+        })();
+      },[dbxToken]);
+
+      // データ変更時に自動同期（3秒デバウンス）
+      useEffect(()=>{
+        if(!dbxToken||!dbxInitRef.current)return;
+        if(dbxTimerRef.current)clearTimeout(dbxTimerRef.current);
+        dbxTimerRef.current=setTimeout(async()=>{
+          setDbxStatus('syncing');
+          const ok=await dbxUpload(dbxToken,{projects,members,nPid});
+          if(ok){const n=new Date().toISOString();localStorage.setItem('dbx_last_sync',n);setDbxLastSync(n);setDbxStatus('ok');}
+          else setDbxStatus('error');
+        },3000);
+        return()=>clearTimeout(dbxTimerRef.current);
+      },[projects,members,nPid,dbxToken]);
 
       const conflicts=useMemo(()=>getConflicts(projects,members),[projects,members]);
 
@@ -717,9 +861,37 @@
                 <input type="file" accept=".json" style={{display:"none"}} onChange={importData}/>
               </label>
               <div style={{width:1,height:14,background:"#E8E7E3"}}/>
-              <span style={{fontSize:11,color:"#CCC"}}>Dropbox 連携</span>
+              {!dbxToken
+                ?<button className="sync-btn" onClick={connectDropbox}
+                    style={{color:"#0061FF",borderColor:"#0061FF",display:"flex",alignItems:"center",gap:4}}>
+                    <svg width="12" height="12" viewBox="0 0 40 40" fill="#0061FF"><path d="M20 7.3L10 13.6l10 6.4 10-6.4L20 7.3zM10 26.4l10 6.3 10-6.3-10-6.4-10 6.4zM10 13.6L0 20l10 6.4 10-6.4L10 13.6zM30 13.6l-10 6.4 10 6.4 10-6.4-10-6.4z"/></svg>
+                    Dropbox連携
+                  </button>
+                :<div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <svg width="11" height="11" viewBox="0 0 40 40" fill={dbxStatus==='error'?"#E11D48":"#0061FF"}><path d="M20 7.3L10 13.6l10 6.4 10-6.4L20 7.3zM10 26.4l10 6.3 10-6.3-10-6.4-10 6.4zM10 13.6L0 20l10 6.4 10-6.4L10 13.6zM30 13.6l-10 6.4 10 6.4 10-6.4-10-6.4z"/></svg>
+                    <span style={{fontSize:11,color:dbxStatus==='error'?"#E11D48":dbxStatus==='syncing'?"#888":dbxStatus==='conflict'?"#D97706":"#0061FF"}}>
+                      {dbxStatus==='syncing'?'同期中...'
+                       :dbxStatus==='error'?'同期エラー'
+                       :dbxStatus==='conflict'?'更新あり'
+                       :dbxLastSync?fmtTime(new Date(dbxLastSync)):'接続済'}
+                    </span>
+                    <button onClick={disconnectDropbox}
+                      style={{background:"none",border:"none",color:"#CCC",cursor:"pointer",fontSize:11,padding:"0 2px",lineHeight:1}}>×</button>
+                  </div>
+              }
             </div>
           </div>
+          {/* Dropbox競合通知 */}
+          {dbxConflict&&(
+            <div style={{margin:"0 28px",padding:"10px 14px",background:"#FFFBEB",border:"1px solid #FCD34D",borderRadius:6,display:"flex",alignItems:"center",gap:10,fontSize:12}}>
+              <svg width="14" height="14" viewBox="0 0 40 40" fill="#D97706"><path d="M20 7.3L10 13.6l10 6.4 10-6.4L20 7.3zM10 26.4l10 6.3 10-6.3-10-6.4-10 6.4zM10 13.6L0 20l10 6.4 10-6.4L10 13.6zM30 13.6l-10 6.4 10 6.4 10-6.4-10-6.4z"/></svg>
+              <span style={{flex:1,color:"#92400E"}}>別の端末で更新されたデータがDropboxにあります</span>
+              <button onClick={()=>loadFromDropbox(dbxConflict)}
+                style={{padding:"4px 12px",background:"#0061FF",color:"#fff",border:"none",borderRadius:4,fontSize:11,fontWeight:600,cursor:"pointer"}}>Dropboxを読み込む</button>
+              <button onClick={()=>{setDbxConflict(null);setDbxStatus('ok');}}
+                style={{padding:"4px 10px",background:"#F3F4F6",color:"#444",border:"1px solid #E5E7EB",borderRadius:4,fontSize:11,cursor:"pointer"}}>このまま続ける</button>
+            </div>
+          )}
 
           {/* ── メンバーパネル */}
           {showMbr&&(
