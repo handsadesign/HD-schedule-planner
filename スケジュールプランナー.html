@@ -470,7 +470,7 @@
         const challenge=btoa(String.fromCharCode(...new Uint8Array(digest)))
           .replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
         sessionStorage.setItem('dbx_v',verifier);
-        const redir=location.origin+location.pathname;
+        const redir=location.origin+'/';
         location.href='https://www.dropbox.com/oauth2/authorize?'+new URLSearchParams({
           response_type:'code',client_id:DBX_APP_KEY,redirect_uri:redir,
           code_challenge:challenge,code_challenge_method:'S256',token_access_type:'offline'});
@@ -535,10 +535,11 @@
         localStorage.setItem('dbx_last_sync',n);setDbxLastSync(n);setDbxStatus('ok');
       };
 
-      // OAuthコールバック処理（認証後にURLに?code=が付く）
+      // OAuthコールバック処理（index.htmlで受け取りsessionStorageに保存→ここで処理）
       useEffect(()=>{
-        const params=new URLSearchParams(location.search);
-        const code=params.get('code');if(!code)return;
+        let code=new URLSearchParams(location.search).get('code');
+        if(!code){code=sessionStorage.getItem('dbx_oauth_code');if(code)sessionStorage.removeItem('dbx_oauth_code');}
+        if(!code)return;
         const verifier=sessionStorage.getItem('dbx_v');if(!verifier)return;
         sessionStorage.removeItem('dbx_v');
         history.replaceState({},'',location.pathname);
@@ -548,7 +549,7 @@
             method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
             body:new URLSearchParams({code,grant_type:'authorization_code',
               client_id:DBX_APP_KEY,code_verifier:verifier,
-              redirect_uri:location.origin+location.pathname})
+              redirect_uri:location.origin+'/'})
           });
           if(!res.ok){setDbxStatus('error');return;}
           const d=await res.json();
