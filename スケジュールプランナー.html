@@ -1,0 +1,1504 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>スケジュールプランナー</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { margin: 0; padding: 0; background: #F5F4F0; }
+    #root { min-height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useMemo, useRef, useEffect } = React;
+
+    // ─── ユーティリティ ──────────────────────────────────────────────────────
+    function hex2rgb(hex){return{r:parseInt(hex.slice(1,3),16),g:parseInt(hex.slice(3,5),16),b:parseInt(hex.slice(5,7),16)};}
+    // ─── 日本の祝日・お盆・年末年始 ──────────────────────────────────────────
+    function dateToStr(d){return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
+    function computeJpHolidays(year){
+      const map=new Map();
+      const addK=(k,n)=>{if(!map.has(k))map.set(k,n);};
+      const addMD=(m,d,n)=>addK(`${year}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`,n);
+      // nth weekday of month helper
+      const nthWd=(mo,wd,n)=>{const d=new Date(year,mo-1,1);let c=0;while(d.getMonth()===mo-1){if(d.getDay()===wd&&++c===n)return dateToStr(d);d.setDate(d.getDate()+1);}return null;};
+      // 春分・秋分（近似式）
+      const vd=Math.floor(20.8431+0.242194*(year-1980)-Math.floor((year-1980)/4));
+      const ad=Math.floor(23.2488+0.242194*(year-1980)-Math.floor((year-1980)/4));
+      // ── 国民の祝日
+      addMD(1,1,'元日');
+      const sjk=nthWd(1,1,2);if(sjk)addK(sjk,'成人の日');       // 1月第2月曜
+      addMD(2,11,'建国記念の日');
+      if(year>=2020)addMD(2,23,'天皇誕生日');
+      addMD(3,vd,'春分の日');
+      addMD(4,29,'昭和の日');
+      addMD(5,3,'憲法記念日');addMD(5,4,'みどりの日');addMD(5,5,'こどもの日');
+      const umik=nthWd(7,1,3);if(umik)addK(umik,'海の日');       // 7月第3月曜
+      addMD(8,11,'山の日');
+      const keirk=nthWd(9,1,3);if(keirk)addK(keirk,'敬老の日'); // 9月第3月曜
+      addMD(9,ad,'秋分の日');
+      const spk=nthWd(10,1,2);if(spk)addK(spk,'スポーツの日');   // 10月第2月曜
+      addMD(11,3,'文化の日');addMD(11,23,'勤労感謝の日');
+      // ── 振替休日（国民の祝日のみ対象・お盆や年末年始は対象外）
+      for(const k of [...map.keys()].sort()){
+        const d=new Date(k+'T00:00:00');
+        if(d.getDay()===0){
+          const sub=new Date(d);sub.setDate(sub.getDate()+1);
+          while(map.has(dateToStr(sub)))sub.setDate(sub.getDate()+1);
+          addK(dateToStr(sub),'振替休日');
+        }
+      }
+      // ── 国民の休日（祝日に挟まれた平日）
+      const sk=[...map.keys()].sort();
+      for(let i=0;i<sk.length-1;i++){
+        const d1=new Date(sk[i]+'T00:00:00'),d2=new Date(sk[i+1]+'T00:00:00');
+        if(Math.round((d2-d1)/86400000)===2){
+          const mid=new Date(d1);mid.setDate(mid.getDate()+1);
+          if(mid.getDay()!==0&&mid.getDay()!==6){const mk=dateToStr(mid);if(!map.has(mk))map.set(mk,'国民の休日');}
+        }
+      }
+      // ── お盆（8/13〜16）・年末年始（12/29〜1/3）：振替休日なし
+      addMD(8,13,'お盆');addMD(8,14,'お盆');addMD(8,15,'お盆');addMD(8,16,'お盆');
+      addMD(12,29,'年末年始');addMD(12,30,'年末年始');addMD(12,31,'年末年始');
+      addMD(1,2,'年始');addMD(1,3,'年始');
+      return map;
+    }
+    const _hCache={};
+    function getJpH(year){if(!_hCache[year])_hCache[year]=computeJpHolidays(year);return _hCache[year];}
+    function isJpHoliday(k){return getJpH(+k.slice(0,4)).has(k);}
+    function getJpHolidayName(k){return getJpH(+k.slice(0,4)).get(k)||null;}
+
+    // ─── メンバー固有の休日チェック ─────────────────────────────────────────
+    const DOWS_JP=["日","月","火","水","木","金","土"];
+    function fmtDateDow(k){const d=new Date(k+'T00:00:00');return`${k}（${DOWS_JP[d.getDay()]}）`;}
+    function isMemberOff(k,member){
+      const h=member.holidays;if(!h)return false;
+      const d=new Date(k+'T00:00:00'),dow=d.getDay();
+      if((h.dates||[]).includes(k))return true;
+      if((h.weekly||[]).includes(dow))return true;
+      for(const ref of(h.biweekly||[])){
+        const rd=new Date(ref+'T00:00:00');
+        if(rd.getDay()!==dow)continue;
+        if(Math.abs(Math.round((d-rd)/86400000))%14===0)return true;
+      }
+      return false;
+    }
+
+    // satOnly=true → 土曜のみ稼働（祝日関係なし）
+    // workSat=true  → 平日＋土曜稼働（日曜・祝日は休み）
+    // どちらも false → 平日のみ稼働（土日・祝日は休み）
+    function isOff(d,workSat,satOnly){
+      const date=new Date(d),k=dateToStr(date),w=date.getDay();
+      if(satOnly)return w!==6; // 土曜のみ稼働
+      return w===0||(!workSat&&w===6)||isJpHoliday(k);
+    }
+    function skipWe(date){const d=new Date(date);while(isOff(d,false,false))d.setDate(d.getDate()+1);return d;} // 後方互換用
+    function skipToWork(date,workSat,satOnly){const d=new Date(date);while(isOff(d,workSat,satOnly))d.setDate(d.getDate()+1);return d;}
+    function taskEnd(start,days,workSat,satOnly){
+      const d=skipToWork(new Date(start),workSat,satOnly);let rem=Math.max(1,days)-1;
+      while(rem>0){d.setDate(d.getDate()+1);if(!isOff(d,workSat,satOnly))rem--;}return d;
+    }
+    function taskDates(proj,members){
+      let cur=new Date(proj.startDate);
+      return proj.tasks.map(t=>{
+        const ws=t.workSat||false,so=t.satOnly||false;
+        const mlist=members?(t.assigneeIds||[]).map(id=>members.find(m=>m.id===id)).filter(Boolean):[];
+        const off=d=>{
+          if(isOff(d,ws,so))return true;
+          const k=dateToStr(new Date(d));
+          return mlist.some(m=>isMemberOff(k,m));
+        };
+        const s=new Date(cur);while(off(s))s.setDate(s.getDate()+1);
+        const e=new Date(s);let rem=Math.max(1,t.days)-1;
+        while(rem>0){e.setDate(e.getDate()+1);if(!off(e))rem--;}
+        cur=new Date(e);cur.setDate(cur.getDate()+1);
+        return{task:t,startDate:s,endDate:e};
+      });
+    }
+    function projEnd(proj,members){if(!proj.tasks.length)return skipWe(new Date(proj.startDate));const d=taskDates(proj,members);return d[d.length-1].endDate;}
+
+    // 月表示内で「稼働日のみ」を連続セグメントに分割して返す（稼働日以外はギャップ）
+    function taskWorkSegments(startDate,endDate,task,members,yr,mo){
+      const D=dim(yr,mo);
+      const sd=new Date(startDate),ed=new Date(endDate);
+      const ms=new Date(yr,mo,1),me=new Date(yr,mo,D);
+      if(ed<ms||sd>me)return[];
+      const ws=task.workSat||false,so=task.satOnly||false;
+      const mlist=members?(task.assigneeIds||[]).map(id=>members.find(m=>m.id===id)).filter(Boolean):[];
+      const off=d=>{
+        if(isOff(d,ws,so))return true;
+        const k=dateToStr(new Date(d));
+        return mlist.some(m=>isMemberOff(k,m));
+      };
+      const from=sd<ms?new Date(ms):new Date(sd);
+      const to=ed>me?new Date(me):new Date(ed);
+      const segs=[];let segStart=null;
+      for(const cur=new Date(from);cur<=to;cur.setDate(cur.getDate()+1)){
+        if(!off(cur)){if(segStart===null)segStart=cur.getDate();}
+        else if(segStart!==null){segs.push({s:segStart,e:cur.getDate()-1});segStart=null;}
+      }
+      if(segStart!==null)segs.push({s:segStart,e:to.getDate()});
+      return segs;
+    }
+
+    function dim(y,m){return new Date(y,m+1,0).getDate();}
+    function overlap(s,e,yr,mo){
+      const D=dim(yr,mo),ms=new Date(yr,mo,1),me=new Date(yr,mo,D,23,59,59),sd=new Date(s),ed=new Date(e);
+      if(ed<ms||sd>me)return null;
+      return{s:sd<ms?1:sd.getDate(),e:ed>me?D:ed.getDate()};
+    }
+    function fmt(date){return date?new Date(date).toISOString().slice(0,10):"";}
+    function fmtTime(date){if(!date)return"";const d=new Date(date);return`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;}
+    function assignLanes(tasks){
+      const sorted=[...tasks].sort((a,b)=>new Date(a.startDate)-new Date(b.startDate));
+      const ends=[];
+      return sorted.map(item=>{
+        let lane=ends.findIndex(e=>new Date(e)<new Date(item.startDate));
+        if(lane===-1)lane=ends.length;
+        ends[lane]=new Date(item.endDate);
+        return{...item,lane};
+      });
+    }
+
+    // ─── 競合検出 ─────────────────────────────────────────────────────────────
+    function getConflicts(projects,members){
+      const byM={};members.forEach(m=>{byM[m.id]=[];});
+      projects.forEach(proj=>{
+        taskDates(proj,members).forEach(({task,startDate,endDate})=>{
+          (task.assigneeIds||[]).forEach(aid=>{
+            if(aid&&byM[aid])byM[aid].push({task,startDate,endDate,project:proj});
+          });
+        });
+      });
+      const out=[];
+      Object.entries(byM).forEach(([mid,list])=>{
+        for(let i=0;i<list.length;i++)for(let j=i+1;j<list.length;j++){
+          const a=list[i],b=list[j];
+          if(new Date(a.startDate)<=new Date(b.endDate)&&new Date(b.startDate)<=new Date(a.endDate)){
+            const member=members.find(m=>m.id===+mid);
+            out.push({member,a,b,id:`${a.project.id}-${a.task.id}-${b.project.id}-${b.task.id}`});
+          }
+        }
+      });
+      return out;
+    }
+    function isConflicted(pId,tId,conflicts){
+      return conflicts.some(c=>(c.a.project.id===pId&&c.a.task.id===tId)||(c.b.project.id===pId&&c.b.task.id===tId));
+    }
+
+    // ─── 定数 ────────────────────────────────────────────────────────────────
+    const PCOLS=[{id:"rose",bg:"#F43F5E"},{id:"amber",bg:"#F59E0B"},{id:"emerald",bg:"#10B981"},
+                 {id:"sky",bg:"#38BDF8"},{id:"violet",bg:"#8B5CF6"},{id:"orange",bg:"#F97316"}];
+    const MPAL=["#38BDF8","#10B981","#F59E0B","#EC4899","#8B5CF6","#F97316","#6366F1","#14B8A6"];
+    const MOS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const DW=28,RH=48,LH=26;
+    let _t=200;const nt=()=>++_t;
+    let _m=10;const nm=()=>++_m;
+
+    // ─── 初期データ ──────────────────────────────────────────────────────────
+    const I_MBR=[
+      {id:1,name:"田中",color:"#38BDF8"},
+      {id:2,name:"鈴木",color:"#10B981"},
+      {id:3,name:"山田",color:"#F59E0B"},
+      {id:4,name:"佐藤",color:"#EC4899"},
+    ];
+    const I_PRJ=[
+      {id:1,name:"ウェブサイトリニューアル",color:PCOLS[2],startDate:"2026-05-01",description:"コーポレートサイト刷新",
+       tasks:[{id:1,name:"要件定義・設計",days:5,assigneeIds:[1]},{id:2,name:"UI/UX デザイン",days:10,assigneeIds:[2]},
+              {id:3,name:"フロントエンド実装",days:15,assigneeIds:[3]},{id:4,name:"テスト・QA",days:5,assigneeIds:[1]}]},
+      {id:2,name:"モバイルアプリ v2",color:PCOLS[0],startDate:"2026-05-15",description:"iOS/Android 新バージョン",
+       tasks:[{id:1,name:"スペック確定",days:3,assigneeIds:[1]},{id:2,name:"API 設計・開発",days:15,assigneeIds:[4]},
+              {id:3,name:"アプリ実装",days:20,assigneeIds:[3]},{id:4,name:"ストア申請",days:5,assigneeIds:[2]}]},
+      {id:3,name:"データ分析基盤",color:PCOLS[3],startDate:"2026-06-02",description:"BI ダッシュボード整備",
+       tasks:[{id:1,name:"データソース調査",days:3,assigneeIds:[4]},{id:2,name:"ETL パイプライン",days:10,assigneeIds:[1]},
+              {id:3,name:"ダッシュボード開発",days:8,assigneeIds:[2]}]},
+    ];
+
+    // ─── localStorage ─────────────────────────────────────────────────────────
+    const STORAGE_KEY='schedulePlanner_v1';
+    function loadSavedData(){
+      try{const s=localStorage.getItem(STORAGE_KEY);if(s)return JSON.parse(s);}catch(e){}
+      return null;
+    }
+    // 旧フォーマット（assigneeId: Number）→ 新フォーマット（assigneeIds: []）マイグレーション
+    function migrateProjects(ps){
+      return ps.map(p=>({...p,tasks:p.tasks.map(t=>{
+        if(!Array.isArray(t.assigneeIds)){
+          const{assigneeId,...rest}=t;
+          return{...rest,assigneeIds:assigneeId!=null?[assigneeId]:[]};
+        }
+        return t;
+      })}));
+    }
+    const _saved=loadSavedData();
+    if(_saved?.members?.length){_m=Math.max(_m,..._saved.members.map(m=>m.id));}
+
+    // ─── アプリ本体 ───────────────────────────────────────────────────────────
+    function App(){
+      const today=new Date();
+      const[yr,setYr]         =useState(today.getFullYear());
+      const[mo,setMo]         =useState(today.getMonth());
+      const[projects,setProjects]=useState(_saved?.projects?migrateProjects(_saved.projects):I_PRJ);
+      const[members,setMembers]  =useState(_saved?.members??I_MBR);
+      const[nPid,setNPid]     =useState(_saved?.nPid??4);
+      const[view,setView]     =useState("project");
+      const[selId,setSelId]   =useState(null);
+      const[hovSeg,setHovSeg] =useState(null);
+      const[showModal,setShowModal]=useState(false);
+      const[editProj,setEditProj] =useState(null);
+      const[showMbr,setShowMbr]  =useState(false);
+      const[newMbrName,setNewMbrName]=useState("");
+      const[form,setForm]     =useState(null);
+      const[formErr,setFormErr]  =useState("");
+      const[savedAt,setSavedAt]  =useState(_saved?new Date():null);
+      const[importErr,setImportErr]=useState("");
+      const[isDuplicate,setIsDuplicate]=useState(false);
+      const[editHolMbr,setEditHolMbr]=useState(null);   // 個人休暇編集中のメンバーID
+      const[holDateInput,setHolDateInput]=useState("");   // 特定日入力
+      const[holBiweeklyInput,setHolBiweeklyInput]=useState(""); // 隔週基準日入力
+      const dragIdx=useRef(null);
+      const[dragOverIdx,setDragOverIdx]=useState(null);
+
+      const D=dim(yr,mo);
+      const days=Array.from({length:D},(_,i)=>i+1);
+      const todayCol=(today.getFullYear()===yr&&today.getMonth()===mo)?today.getDate():null;
+
+      // 表示月の祝日マップ（日 → 祝日名）
+      const holiDays=useMemo(()=>{
+        const s=new Map();
+        for(let d=1;d<=D;d++){
+          const k=`${yr}-${String(mo+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+          const n=getJpHolidayName(k);
+          if(n)s.set(d,n);
+        }
+        return s;
+      },[yr,mo,D]);
+
+      const prevMo=()=>{if(mo===0){setYr(y=>y-1);setMo(11);}else setMo(m=>m-1);};
+      const nextMo=()=>{if(mo===11){setYr(y=>y+1);setMo(0);}else setMo(m=>m+1);};
+
+      // 自動保存
+      useEffect(()=>{
+        try{
+          localStorage.setItem(STORAGE_KEY,JSON.stringify({projects,members,nPid}));
+          setSavedAt(new Date());
+        }catch(e){}
+      },[projects,members,nPid]);
+
+      // 書き出し
+      const exportData=()=>{
+        const data=JSON.stringify({projects,members,nPid,exportedAt:new Date().toISOString()},null,2);
+        const blob=new Blob([data],{type:'application/json'});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');
+        a.href=url;a.download=`スケジュールデータ_${fmt(new Date())}.json`;
+        document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+      };
+
+      // Excel出力モーダルを開く
+      const openExportModal=()=>{
+        setExpSelIds(projects.map(p=>p.id));
+        setExpRangeMode('project');
+        setExpStart('');setExpEnd('');
+        setShowExpModal(true);
+      };
+
+      // Excelガントチャート出力（selIds: number[], rangeStart/rangeEnd: Date）
+      const runExportGanttExcel=(selIds,rangeStart,rangeEnd)=>{
+        const selProjs=projects.filter(p=>selIds.includes(p.id));
+        if(!selProjs.length)return;
+        const DOWS2=["日","月","火","水","木","金","土"];
+        const blend=(r,g,b,a)=>{
+          const R=Math.round(r*a+255*(1-a)),G=Math.round(g*a+255*(1-a)),B=Math.round(b*a+255*(1-a));
+          return`#${R.toString(16).padStart(2,'0')}${G.toString(16).padStart(2,'0')}${B.toString(16).padStart(2,'0')}`;
+        };
+        // rangeStart〜rangeEndの全日を配列化
+        const dayArr=[];
+        const cur=new Date(rangeStart);cur.setHours(0,0,0,0);
+        const endD=new Date(rangeEnd);endD.setHours(0,0,0,0);
+        while(cur<=endD){
+          const d=cur.getDate(),mo_=cur.getMonth(),yr_=cur.getFullYear();
+          const k=dateToStr(cur),dow=cur.getDay(),holName=isJpHoliday(k)||'';
+          dayArr.push({date:new Date(cur),d,mo:mo_,yr:yr_,k,dow,isHol:!!holName,holName});
+          cur.setDate(cur.getDate()+1);
+        }
+        if(!dayArr.length)return;
+        const cols=5+dayArr.length;
+        // 月グループ（月ヘッダー行）
+        const moGroups=[];
+        dayArr.forEach(day=>{
+          const key=`${day.yr}-${day.mo}`;
+          if(!moGroups.length||moGroups[moGroups.length-1].key!==key)
+            moGroups.push({key,label:`${day.yr}年${day.mo+1}月`,count:1});
+          else moGroups[moGroups.length-1].count++;
+        });
+        let rows='';
+        // タイトル行
+        const fmtD=d=>`${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+        rows+=`<tr><td colspan="${cols}" style="background:#1A1A1A;color:#fff;font-weight:bold;font-size:13pt;padding:8px 12px;border:none;">ガントチャート　${fmtD(rangeStart)} 〜 ${fmtD(rangeEnd)}</td></tr>\n`;
+        // 月ヘッダー行
+        rows+='<tr>';
+        rows+=`<td colspan="5" style="background:#E8E7E3;border:1px solid #D1D0CC;"></td>`;
+        moGroups.forEach(g=>rows+=`<td colspan="${g.count}" style="background:#2D2D2D;color:#fff;text-align:center;font-weight:bold;font-size:9pt;padding:3px 0;border:1px solid #444;">${g.label}</td>`);
+        rows+='</tr>\n';
+        // 日付ヘッダー行
+        rows+='<tr>';
+        rows+=`<th style="background:#E8E7E3;color:#444;min-width:140px;text-align:left;padding:4px 8px;">タスク名</th>`;
+        rows+=`<th style="background:#E8E7E3;color:#444;min-width:80px;text-align:center;">担当者</th>`;
+        rows+=`<th style="background:#E8E7E3;color:#444;min-width:44px;text-align:center;">開始日</th>`;
+        rows+=`<th style="background:#E8E7E3;color:#444;min-width:44px;text-align:center;">終了日</th>`;
+        rows+=`<th style="background:#E8E7E3;color:#444;min-width:36px;text-align:center;">日数</th>`;
+        dayArr.forEach(({d,dow,isHol})=>{
+          const isSat=dow===6,isSun=dow===0;
+          const bg=isSun||isHol?'#FFE8EC':isSat?'#EBF4FF':'#F5F4F0';
+          const col=isSun||isHol?'#C11D3E':isSat?'#1D53B0':'#888';
+          rows+=`<th style="background:${bg};color:${col};text-align:center;width:20px;min-width:20px;font-size:8pt;padding:2px 0;">${d}</th>`;
+        });
+        rows+='</tr>\n';
+        // 曜日行
+        rows+='<tr>';
+        rows+=`<td colspan="5" style="background:#F0EFEB;color:#AAA;font-size:8pt;text-align:right;padding:2px 8px;">曜日</td>`;
+        dayArr.forEach(({dow,isHol,holName})=>{
+          const isSat=dow===6,isSun=dow===0;
+          const bg=isSun||isHol?'#FFE8EC':isSat?'#EBF4FF':'#F5F4F0';
+          const col=isSun||isHol?'#C11D3E':isSat?'#1D53B0':'#AAA';
+          rows+=`<td style="background:${bg};color:${col};text-align:center;font-size:8pt;padding:2px 0;" title="${holName}">${DOWS2[dow]}</td>`;
+        });
+        rows+='</tr>\n';
+        // プロジェクトごとの行
+        selProjs.forEach((proj,pi)=>{
+          const tds=taskDates(proj,members);
+          const{r,g,b}=hex2rgb(proj.color.bg);
+          const barColor=proj.color.bg,barLight=blend(r,g,b,0.18);
+          rows+=`<tr><td colspan="${cols}" style="background:${barColor};color:#fff;font-weight:bold;padding:5px 10px;font-size:10pt;">▌ ${proj.name}</td></tr>\n`;
+          if(!tds.length){
+            rows+=`<tr><td colspan="${cols}" style="color:#CCC;text-align:center;padding:6px;">タスクなし</td></tr>\n`;
+          }else{
+            tds.forEach(({task,startDate,endDate})=>{
+              const mbrs=(task.assigneeIds||[]).map(id=>members.find(m=>m.id===id)).filter(Boolean);
+              const assigneeStr=mbrs.length?mbrs.map(m=>m.name).join('・'):'未割当';
+              const sd=new Date(startDate),ed=new Date(endDate);
+              const sStr=`${sd.getMonth()+1}/${sd.getDate()}`;
+              const eStr=`${ed.getMonth()+1}/${ed.getDate()}`;
+              const ws=task.workSat||false,so=task.satOnly||false;
+              const badge=so?' [土固]':ws?' [土稼働]':'';
+              // UTC/ローカル時刻のズレを避けるため日付文字列で比較
+              const skd=dateToStr(sd),ekd=dateToStr(ed);
+              rows+='<tr>';
+              rows+=`<td style="padding:3px 8px;font-weight:500;">${task.name}${badge}</td>`;
+              rows+=`<td style="text-align:center;color:#444;padding:3px 6px;">${assigneeStr}</td>`;
+              rows+=`<td style="text-align:center;color:#666;">${sStr}</td>`;
+              rows+=`<td style="text-align:center;color:#666;">${eStr}</td>`;
+              rows+=`<td style="text-align:center;color:#666;font-weight:500;">${task.days}</td>`;
+              dayArr.forEach(({date,k,dow,isHol})=>{
+                const isSat=dow===6,isSun=dow===0;
+                const inRange=k>=skd&&k<=ekd;  // 文字列比較でタイムゾーン問題を回避
+                if(inRange){
+                  const offDay=isOff(date,ws,so)||mbrs.some(m=>isMemberOff(k,m));
+                  rows+=offDay?`<td style="background:${barLight};"> </td>`
+                              :`<td style="background:${barColor};"> </td>`;
+                }else{
+                  const bg2=isSun||isHol?'#FFF5F7':isSat?'#F5F9FF':'';
+                  rows+=`<td style="background:${bg2};"> </td>`;
+                }
+              });
+              rows+='</tr>\n';
+            });
+          }
+          if(pi<selProjs.length-1)
+            rows+=`<tr><td colspan="${cols}" style="height:8px;background:#F8F7F5;border-left:none;border-right:none;"></td></tr>\n`;
+        });
+        const rangeLabel=moGroups.map(g=>g.label).join('_');
+        const html=`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8">
+<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>
+<x:Name>ガントチャート</x:Name>
+<x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
+</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
+<style>body{font-family:"Yu Gothic UI","Meiryo","MS PGothic",sans-serif;font-size:10pt;}table{border-collapse:collapse;}td,th{border:1px solid #D1D0CC;padding:2px 3px;font-size:9pt;white-space:nowrap;vertical-align:middle;}</style>
+</head><body><table>${rows}</table></body></html>`;
+        const bom='﻿';
+        const blob=new Blob([bom+html],{type:'application/vnd.ms-excel;charset=utf-8'});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');
+        a.href=url;a.download=`ガントチャート_${rangeLabel}.xls`;
+        document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+      };
+
+      // 読み込み
+      const importData=(e)=>{
+        const file=e.target.files[0];if(!file)return;
+        setImportErr("");
+        const reader=new FileReader();
+        reader.onload=(ev)=>{
+          try{
+            const data=JSON.parse(ev.target.result);
+            if(!data.projects||!data.members)throw new Error();
+            setProjects(migrateProjects(data.projects));setMembers(data.members);
+            if(data.nPid)setNPid(data.nPid);
+            if(data.members.length)_m=Math.max(_m,...data.members.map(m=>m.id));
+            setSelId(null);
+          }catch{setImportErr("読み込み失敗：正しいデータファイルを選択してください");}
+        };
+        reader.readAsText(file);e.target.value='';
+      };
+
+      const conflicts=useMemo(()=>getConflicts(projects,members),[projects,members]);
+
+      const visPrj=useMemo(()=>projects.filter(p=>{
+        const s=skipWe(new Date(p.startDate)),e=projEnd(p,members);
+        return overlap(s,e,yr,mo)!==null;
+      }),[projects,members,yr,mo]);
+
+      // プロジェクト別ガント：プロジェクト → メンバー行
+      const projData=useMemo(()=>visPrj.map(proj=>{
+        const tds=taskDates(proj,members);
+        const rowMap=new Map();
+        tds.forEach(({task,startDate,endDate})=>{
+          const segs=taskWorkSegments(startDate,endDate,task,members,yr,mo);
+          if(!segs.length)return;
+          const ids=task.assigneeIds||[];
+          (ids.length?ids:['unassigned']).forEach(key=>{
+            const mbr=key==='unassigned'?null:members.find(m=>m.id===key);
+            if(!rowMap.has(key))rowMap.set(key,{member:mbr,items:[]});
+            rowMap.get(key).items.push({task,startDate,endDate,segs});
+          });
+        });
+        return{project:proj,memberRows:[...rowMap.values()]};
+      }),[visPrj,members,yr,mo]);
+
+      const mbrData=useMemo(()=>members.map(mbr=>{
+        const tasks=[];
+        projects.forEach(proj=>{
+          taskDates(proj,members).forEach(({task,startDate,endDate})=>{
+            if((task.assigneeIds||[]).includes(mbr.id)){
+              const segs=taskWorkSegments(startDate,endDate,task,members,yr,mo);
+              if(segs.length)tasks.push({task,startDate,endDate,project:proj,segs});
+            }
+          });
+        });
+        tasks.sort((a,b)=>new Date(a.startDate)-new Date(b.startDate));
+        return{member:mbr,tasks};
+      }),[members,projects,yr,mo]);
+
+      const selProj=projects.find(p=>p.id===selId)??null;
+
+      const formConflictIds=useMemo(()=>{
+        if(!form?.startDate||!form?.tasks.length)return new Set();
+        const mock={id:editProj?.id??-999,startDate:form.startDate,tasks:form.tasks};
+        const others=projects.filter(p=>p.id!==(editProj?.id??-999));
+        return new Set(getConflicts([...others,mock],members)
+          .flatMap(c=>[c.a.project.id===mock.id?c.a.task.id:null,c.b.project.id===mock.id?c.b.task.id:null].filter(Boolean)));
+      },[form,projects,members,editProj]);
+
+      const openAdd=()=>{
+        setForm({name:"",startDate:fmt(skipWe(new Date(yr,mo,1))),colorId:PCOLS[nPid%PCOLS.length].id,description:"",
+                 tasks:[{id:nt(),name:"タスク 1",days:5,assigneeIds:[]}]});
+        setEditProj(null);setIsDuplicate(false);setFormErr("");setShowModal(true);
+      };
+      const openEdit=(p)=>{
+        setForm({name:p.name,startDate:p.startDate,colorId:p.color.id,description:p.description||"",tasks:p.tasks.map(t=>({...t}))});
+        setEditProj(p);setIsDuplicate(false);setFormErr("");setShowModal(true);
+      };
+      const openDuplicate=(p)=>{
+        setForm({
+          name:`${p.name}（コピー）`,
+          startDate:fmt(skipWe(new Date(yr,mo,1))),
+          colorId:p.color.id,
+          description:p.description||"",
+          tasks:p.tasks.map(t=>({...t,id:nt()})),
+        });
+        setEditProj(null);setIsDuplicate(true);setFormErr("");setShowModal(true);
+      };
+      const addTask=()=>setForm(f=>({...f,tasks:[...f.tasks,{id:nt(),name:`タスク ${f.tasks.length+1}`,days:5,assigneeIds:[]}]}));
+      const updTask=(id,k,v)=>setForm(f=>({...f,tasks:f.tasks.map(t=>t.id===id?{...t,[k]:k==="days"?Math.max(1,parseInt(v)||1):v}:t)}));
+      const toggleAssignee=(taskId,mbrId)=>setForm(f=>({...f,tasks:f.tasks.map(t=>{
+        if(t.id!==taskId)return t;
+        const ids=t.assigneeIds||[];
+        return{...t,assigneeIds:ids.includes(mbrId)?ids.filter(x=>x!==mbrId):[...ids,mbrId]};
+      })}));
+      const delTask=(id)=>setForm(f=>({...f,tasks:f.tasks.filter(t=>t.id!==id)}));
+      const mvTask=(id,dir)=>setForm(f=>{
+        const a=[...f.tasks],i=a.findIndex(t=>t.id===id),j=i+dir;
+        if(j<0||j>=a.length)return f;[a[i],a[j]]=[a[j],a[i]];return{...f,tasks:a};
+      });
+
+      const handleDragStart=(idx)=>{dragIdx.current=idx;};
+      const handleDragOver=(e,idx)=>{e.preventDefault();if(dragIdx.current!==null&&dragIdx.current!==idx)setDragOverIdx(idx);};
+      const handleDrop=(idx)=>{
+        const from=dragIdx.current;
+        if(from===null||from===idx){dragIdx.current=null;setDragOverIdx(null);return;}
+        setForm(f=>{const tasks=[...f.tasks];const[m]=tasks.splice(from,1);tasks.splice(idx,0,m);return{...f,tasks};});
+        dragIdx.current=null;setDragOverIdx(null);
+      };
+      const handleDragEnd=()=>{dragIdx.current=null;setDragOverIdx(null);};
+
+      const computedEnd=useMemo(()=>{
+        if(!form?.startDate||!form?.tasks.length)return null;
+        return projEnd({startDate:form.startDate,tasks:form.tasks},members);
+      },[form,members]);
+
+      // Excel出力モーダル用：有効な出力期間を計算
+      const expEffectiveRange=useMemo(()=>{
+        const sel=projects.filter(p=>expSelIds.includes(p.id));
+        if(!sel.length)return null;
+        if(expRangeMode==='custom'){
+          if(!expStart||!expEnd)return null;
+          const s=new Date(expStart+'T00:00:00'),e=new Date(expEnd+'T00:00:00');
+          if(s>e)return null;
+          return{start:s,end:e,days:Math.round((e-s)/86400000)+1};
+        }
+        const starts=sel.map(p=>new Date(p.startDate+'T00:00:00'));
+        // projEndはUTC起点の場合があるため、ローカル日付(年/月/日)で正規化
+        const ends=sel.map(p=>{const d=projEnd(p,members);return new Date(d.getFullYear(),d.getMonth(),d.getDate());});
+        const s=new Date(Math.min(...starts.map(d=>d.getTime())));
+        const e=new Date(Math.max(...ends.map(d=>d.getTime())));
+        return{start:s,end:e,days:Math.round((e-s)/86400000)+1};
+      },[expSelIds,expRangeMode,expStart,expEnd,projects,members]);
+
+      const submitForm=()=>{
+        if(!form.name.trim()){setFormErr("プロジェクト名を入力してください");return;}
+        if(!form.startDate){setFormErr("開始日を入力してください");return;}
+        if(!form.tasks.length){setFormErr("タスクを1つ以上追加してください");return;}
+        const color=PCOLS.find(c=>c.id===form.colorId)??PCOLS[0];
+        const p={...form,color,tasks:form.tasks.map((t,i)=>({...t,id:i+1}))};
+        if(editProj){setProjects(ps=>ps.map(x=>x.id===editProj.id?{...x,...p,id:editProj.id}:x));}
+        else{setProjects(ps=>[...ps,{...p,id:nPid}]);setNPid(n=>n+1);}
+        setShowModal(false);
+      };
+      const delProj=(id)=>{setProjects(ps=>ps.filter(p=>p.id!==id));if(selId===id)setSelId(null);};
+      const addMbr=()=>{
+        if(!newMbrName.trim())return;
+        setMembers(ms=>[...ms,{id:nm(),name:newMbrName.trim(),color:MPAL[members.length%MPAL.length]}]);
+        setNewMbrName("");
+      };
+      const delMbr=(id)=>{
+        setMembers(ms=>ms.filter(m=>m.id!==id));
+        setProjects(ps=>ps.map(p=>({...p,tasks:p.tasks.map(t=>({...t,assigneeIds:(t.assigneeIds||[]).filter(x=>x!==id)}))})));
+        if(editHolMbr===id)setEditHolMbr(null);
+      };
+      // ── メンバー個人休暇 操作ヘルパー
+      const updMbrHol=(mbrId,fn)=>setMembers(ms=>ms.map(m=>m.id===mbrId?{...m,holidays:fn(m.holidays||{})}:m));
+      const addHolDate=(mbrId,date)=>{
+        if(!date)return;
+        updMbrHol(mbrId,h=>({...h,dates:[...new Set([...(h.dates||[]),date])]}));
+        setHolDateInput("");
+      };
+      const removeHolDate=(mbrId,date)=>updMbrHol(mbrId,h=>({...h,dates:(h.dates||[]).filter(d=>d!==date)}));
+      const toggleHolWeekly=(mbrId,dow)=>updMbrHol(mbrId,h=>{
+        const w=h.weekly||[];
+        return{...h,weekly:w.includes(dow)?w.filter(d=>d!==dow):[...w,dow]};
+      });
+      const addHolBiweekly=(mbrId,ref)=>{
+        if(!ref)return;
+        updMbrHol(mbrId,h=>({...h,biweekly:[...new Set([...(h.biweekly||[]),ref])]}));
+        setHolBiweeklyInput("");
+      };
+      const removeHolBiweekly=(mbrId,ref)=>updMbrHol(mbrId,h=>({...h,biweekly:(h.biweekly||[]).filter(d=>d!==ref)}));
+
+      const getMbr=(id)=>members.find(m=>m.id===id);
+      const totalDays=(p)=>p.tasks.reduce((s,t)=>s+t.days,0);
+
+      // 土日・祝日・今日の背景
+      const BgDecos=({height})=>(
+        <React.Fragment>
+          {days.map(d=>{
+            const dow=new Date(yr,mo,d).getDay();
+            const isH=holiDays.has(d);
+            if(dow===0) return <div key={d} style={{position:"absolute",left:(d-1)*DW,width:DW,top:0,height,background:"rgba(0,0,0,.06)",pointerEvents:"none"}}/>;
+            if(dow===6) return <div key={d} style={{position:"absolute",left:(d-1)*DW,width:DW,top:0,height,background:"rgba(0,0,0,.025)",pointerEvents:"none"}}/>;
+            if(isH)     return <div key={d} style={{position:"absolute",left:(d-1)*DW,width:DW,top:0,height,background:"rgba(239,68,68,.05)",pointerEvents:"none"}}/>;
+            return null;
+          })}
+          {todayCol&&<div style={{position:"absolute",left:(todayCol-.5)*DW,top:0,width:1,height,background:"rgba(245,158,11,.3)",pointerEvents:"none"}}/>}
+        </React.Fragment>
+      );
+
+      // タスク依存コネクター（稼働日セグメントの端点を受け取る）
+      const TaskConnector=({x1,x2,color})=>{
+        if(x1===null||x2===null||x2<=x1+1)return null;
+        const{r,g,b}=hex2rgb(color);
+        return(
+          <svg style={{position:"absolute",top:"50%",transform:"translateY(-50%)",left:0,width:"100%",height:22,pointerEvents:"none",overflow:"visible"}}>
+            <path d={`M ${x1} 11 C ${x1+8} 11, ${x2-8} 11, ${x2} 11`} fill="none" stroke={`rgba(${r},${g},${b},.3)`} strokeWidth="1" strokeDasharray="3 2"/>
+            <polygon points={`${x2},11 ${x2-4},8 ${x2-4},14`} fill={`rgba(${r},${g},${b},.3)`}/>
+          </svg>
+        );
+      };
+
+      // ───────────── RENDER ──────────────────────────────────────────────────
+      return(
+        <div style={{fontFamily:"'Inter',-apple-system,BlinkMacSystemFont,'Hiragino Sans',sans-serif",background:"#F5F4F0",minHeight:"100vh",color:"#1A1A1A"}}>
+          <style>{`
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+            *{box-sizing:border-box}
+            ::-webkit-scrollbar{height:4px;width:4px;background:#ECEAE6}
+            ::-webkit-scrollbar-thumb{background:#D4D2CE;border-radius:2px}
+
+            /* 入力 */
+            .if{width:100%;background:#fff;border:1px solid #DDD;color:#1A1A1A;padding:8px 10px;font-family:inherit;font-size:13px;outline:none;border-radius:4px;transition:border-color .15s}
+            .if:focus{border-color:#9B9B9B}
+            .ifn{width:100%;background:#fff;border:1px solid #DDD;color:#1A1A1A;padding:8px 10px;font-family:inherit;font-size:13px;outline:none;border-radius:4px}
+
+            /* ボタン */
+            .bp{background:#1A1A1A;color:#fff;border:none;padding:8px 18px;font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;border-radius:4px;transition:background .15s}
+            .bp:hover{background:#333}
+            .bg{background:#fff;color:#555;border:1px solid #DDD;padding:6px 14px;font-family:inherit;font-size:12px;cursor:pointer;border-radius:4px;transition:all .15s}
+            .bg:hover{border-color:#999;color:#1A1A1A}
+            .bs{background:transparent;color:#AAA;border:1px solid #E5E5E5;padding:3px 7px;font-family:inherit;font-size:10px;cursor:pointer;border-radius:3px;transition:all .12s}
+            .bs:hover{border-color:#BBB;color:#555}
+            .bs:disabled{opacity:.25;cursor:default}
+
+            /* ガントバー */
+            .seg{cursor:pointer;transition:filter .1s}
+            .seg:hover{filter:brightness(.93)}
+
+            /* プロジェクトカード */
+            .pcard{cursor:pointer;transition:background .15s;border-radius:6px}
+            .pcard:hover{background:#ECEAE6!important}
+
+            /* タブ */
+            .tab{padding:6px 16px;font-family:inherit;font-size:12px;cursor:pointer;border-radius:4px;border:1px solid transparent;transition:all .15s;font-weight:500}
+
+            /* データ管理ボタン */
+            .sync-btn{background:#fff;color:#888;border:1px solid #E5E5E5;padding:4px 12px;font-family:inherit;font-size:11px;cursor:pointer;border-radius:4px;transition:all .15s}
+            .sync-btn:hover{border-color:#BBB;color:#333}
+            .sync-btn label{cursor:pointer}
+
+            /* ドラッグハンドル */
+            .drag-handle{cursor:grab;color:#CCC;font-size:13px;padding:0 4px;user-select:none;flex-shrink:0;transition:color .12s}
+            .drag-handle:hover{color:#888}
+
+            @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+            .fi{animation:fadeIn .16s ease}
+            .mw::-webkit-scrollbar{width:4px}
+          `}</style>
+
+          {/* ── ヘッダー */}
+          <div style={{background:"#fff",borderBottom:"1px solid #E8E7E3",padding:"0 28px"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",height:56}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div style={{fontSize:15,fontWeight:600,color:"#1A1A1A",letterSpacing:"-.01em"}}>スケジュールプランナー</div>
+                <div style={{width:1,height:16,background:"#E8E7E3"}}/>
+                <div style={{fontSize:11,color:"#BBB"}}>リソース管理 Gantt</div>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                {conflicts.length>0&&(
+                  <div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",background:"#FFF1F3",border:"1px solid #FECDD3",borderRadius:4,fontSize:11,color:"#E11D48",fontWeight:500}}>
+                    ⚠ {conflicts.length}件の競合
+                  </div>
+                )}
+                <button className="bg" onClick={()=>setShowMbr(v=>!v)}>メンバー</button>
+                <button className="bp" onClick={openAdd}>+ プロジェクト</button>
+              </div>
+            </div>
+
+            {/* データ管理バー */}
+            <div style={{display:"flex",alignItems:"center",gap:10,height:34,borderTop:"1px solid #F0EFEB"}}>
+              <span style={{fontSize:11,color:savedAt?"#BBB":"#DDD"}}>
+                {savedAt?`自動保存 ${fmtTime(savedAt)}`:"..."}
+              </span>
+              {importErr&&<span style={{fontSize:11,color:"#E11D48"}}>{importErr}</span>}
+              <div style={{flex:1}}/>
+              <button className="sync-btn" onClick={exportData}>↑ 書き出し</button>
+              <label className="sync-btn" style={{cursor:"pointer"}}>
+                ↓ 読み込み
+                <input type="file" accept=".json" style={{display:"none"}} onChange={importData}/>
+              </label>
+              <div style={{width:1,height:14,background:"#E8E7E3"}}/>
+              <span style={{fontSize:11,color:"#CCC"}}>Dropbox 連携</span>
+            </div>
+          </div>
+
+          {/* ── メンバーパネル */}
+          {showMbr&&(
+            <div className="fi" style={{margin:"12px 28px 0",padding:"16px 18px",background:"#fff",border:"1px solid #E8E7E3",borderRadius:8}}>
+              <div style={{fontSize:11,fontWeight:600,color:"#888",letterSpacing:".06em",marginBottom:12}}>メンバー</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:12}}>
+                {members.map(m=>{
+                  const isEd=editHolMbr===m.id;
+                  const h=m.holidays||{};
+                  const hasHol=(h.dates?.length||0)+(h.weekly?.length||0)+(h.biweekly?.length||0)>0;
+                  return(
+                    <div key={m.id} style={{display:"flex",alignItems:"center",gap:7,padding:"5px 10px",
+                      background:isEd?"#F0EFEB":"#F8F7F5",
+                      border:`1px solid ${isEd?"#1A1A1A":"#EAE9E5"}`,borderRadius:20,transition:"all .15s"}}>
+                      <div style={{width:20,height:20,borderRadius:"50%",background:m.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#fff",fontWeight:600}}>{m.name.slice(0,1)}</div>
+                      <span style={{fontSize:12,color:"#444"}}>{m.name}</span>
+                      <button className="bs" title="個人休暇を設定"
+                        onClick={()=>{setEditHolMbr(isEd?null:m.id);setHolDateInput("");setHolBiweeklyInput("");}}
+                        style={{padding:"1px 6px",fontSize:10,color:hasHol?"#1A1A1A":"#CCC",
+                          borderColor:hasHol?"#BBB":"#E5E5E5",fontWeight:hasHol?500:400}}>
+                        {hasHol?"休暇▾":"休暇"}
+                      </button>
+                      <button className="bs" style={{padding:"1px 5px",fontSize:10}} onClick={()=>delMbr(m.id)}>✕</button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* 個人休暇設定パネル */}
+              {editHolMbr&&(()=>{
+                const mbr=members.find(m=>m.id===editHolMbr);if(!mbr)return null;
+                const h=mbr.holidays||{};
+                return(
+                  <div style={{margin:"0 0 14px",padding:"14px 16px",background:"#F8F7F5",border:"1px solid #E8E7E3",borderRadius:6}}>
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        <div style={{width:20,height:20,borderRadius:"50%",background:mbr.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#fff",fontWeight:600}}>{mbr.name.slice(0,1)}</div>
+                        <span style={{fontSize:12,fontWeight:600,color:"#1A1A1A"}}>{mbr.name} の個人休暇</span>
+                      </div>
+                      <button className="bs" onClick={()=>setEditHolMbr(null)}>×閉じる</button>
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+                      {/* 特定日 */}
+                      <div>
+                        <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:6}}>特定日</div>
+                        <div style={{display:"flex",gap:8,marginBottom:6}}>
+                          <input className="if" type="date" style={{maxWidth:170}} value={holDateInput}
+                            onChange={e=>setHolDateInput(e.target.value)}/>
+                          <button className="bg" onClick={()=>addHolDate(editHolMbr,holDateInput)}>追加</button>
+                        </div>
+                        {(h.dates||[]).length>0&&(
+                          <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                            {[...(h.dates||[])].sort().map(d=>(
+                              <div key={d} style={{display:"flex",alignItems:"center",gap:4,padding:"3px 8px",background:"#fff",border:"1px solid #E8E7E3",borderRadius:12,fontSize:11,color:"#555"}}>
+                                {fmtDateDow(d)}
+                                <button className="bs" style={{padding:"0 3px",fontSize:9}} onClick={()=>removeHolDate(editHolMbr,d)}>✕</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 毎週定休 */}
+                      <div>
+                        <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:6}}>毎週定休</div>
+                        <div style={{display:"flex",gap:4}}>
+                          {DOWS_JP.map((dn,i)=>{
+                            const sel=(h.weekly||[]).includes(i);
+                            return(
+                              <div key={i} onClick={()=>toggleHolWeekly(editHolMbr,i)}
+                                style={{width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",
+                                  borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:sel?600:400,
+                                  background:sel?"#1A1A1A":"#fff",color:sel?"#fff":"#999",
+                                  border:`1px solid ${sel?"#1A1A1A":"#E5E5E5"}`,
+                                  transition:"all .12s",userSelect:"none"}}>
+                                {dn}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* 隔週定休 */}
+                      <div>
+                        <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:4}}>隔週定休</div>
+                        <div style={{fontSize:10,color:"#CCC",marginBottom:6}}>基準日を指定 → その日から2週間おきに休み</div>
+                        <div style={{display:"flex",gap:8,marginBottom:6}}>
+                          <input className="if" type="date" style={{maxWidth:170}} value={holBiweeklyInput}
+                            onChange={e=>setHolBiweeklyInput(e.target.value)}/>
+                          <button className="bg" onClick={()=>addHolBiweekly(editHolMbr,holBiweeklyInput)}>追加</button>
+                        </div>
+                        {(h.biweekly||[]).length>0&&(
+                          <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                            {[...(h.biweekly||[])].sort().map(ref=>(
+                              <div key={ref} style={{display:"flex",alignItems:"center",gap:4,padding:"3px 8px",background:"#fff",border:"1px solid #E8E7E3",borderRadius:12,fontSize:11,color:"#555"}}>
+                                {fmtDateDow(ref)} 以降隔週
+                                <button className="bs" style={{padding:"0 3px",fontSize:9}} onClick={()=>removeHolBiweekly(editHolMbr,ref)}>✕</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div style={{display:"flex",gap:8}}>
+                <input className="if" style={{maxWidth:160}} placeholder="名前を入力" value={newMbrName}
+                  onChange={e=>setNewMbrName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addMbr()}/>
+                <button className="bg" onClick={addMbr}>追加</button>
+              </div>
+            </div>
+          )}
+
+          {/* ── ビュー切り替え + 月ナビ */}
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 28px 10px"}}>
+            <div style={{display:"flex",gap:4}}>
+              {[["project","プロジェクト"],["member","メンバー"]].map(([v,label])=>(
+                <button key={v} className="tab" onClick={()=>setView(v)} style={{
+                  background:view===v?"#1A1A1A":"transparent",
+                  color:view===v?"#fff":"#AAA",
+                  border:view===v?"1px solid #1A1A1A":"1px solid transparent",
+                }}>{label}</button>
+              ))}
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <button className="bg" style={{padding:"4px 12px",fontSize:13}} onClick={prevMo}>←</button>
+              <div style={{fontSize:20,fontWeight:600,letterSpacing:"-.02em",minWidth:150,color:"#1A1A1A"}}>
+                {MOS[mo]} <span style={{color:"#CCC",fontWeight:400}}>{yr}</span>
+              </div>
+              <button className="bg" style={{padding:"4px 12px",fontSize:13}} onClick={nextMo}>→</button>
+              <span style={{fontSize:11,color:"#CCC"}}>
+                {view==="project"?`${visPrj.length} / ${projects.length} プロジェクト`:`${members.length} 名`}
+              </span>
+              <div style={{width:1,height:14,background:"#E8E7E3",marginLeft:4}}/>
+              <button onClick={openExportModal} style={{
+                display:"flex",alignItems:"center",gap:5,padding:"5px 11px",
+                background:"#fff",border:"1px solid #D1D0CC",borderRadius:6,
+                fontSize:11,color:"#444",cursor:"pointer",fontWeight:500,
+                boxShadow:"0 1px 2px rgba(0,0,0,.04)",transition:"all .15s",
+              }}
+                onMouseEnter={e=>{e.currentTarget.style.background="#F5F4F0";e.currentTarget.style.borderColor="#BBB";}}
+                onMouseLeave={e=>{e.currentTarget.style.background="#fff";e.currentTarget.style.borderColor="#D1D0CC";}}
+                title="ガントチャートをExcelファイル(.xls)で出力"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#217346" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2"/>
+                  <path d="M3 9h18M9 21V9"/>
+                  <path d="M6 14l2 2-2 2M13 14h4M13 18h4" strokeWidth="1.8"/>
+                </svg>
+                Excel出力
+              </button>
+            </div>
+          </div>
+
+          {/* ── ガント */}
+          <div style={{padding:"0 28px",overflowX:"auto"}}>
+            <div style={{minWidth:D*DW+170,background:"#fff",border:"1px solid #E8E7E3",borderRadius:8}}>
+
+              {/* 日付ヘッダー */}
+              <div style={{display:"flex",marginLeft:170,borderBottom:"1px solid #F0EFEB"}}>
+                {days.map(d=>{
+                  const dow=new Date(yr,mo,d).getDay();
+                  const we=dow===0||dow===6,isT=d===todayCol;
+                  const hname=holiDays.get(d);
+                  const isHoli=!!hname&&!we; // 平日の祝日（土日は別塗り）
+                  return(
+                    <div key={d} title={hname||undefined} style={{width:DW,flexShrink:0,textAlign:"center",padding:"7px 0 6px",fontSize:10,position:"relative",
+                      color:isT?"#F59E0B":isHoli?"#F87171":we?"#CCC":"#BBB",fontWeight:isT?600:400}}>
+                      {d}
+                      {isT&&<div style={{position:"absolute",bottom:0,left:"50%",transform:"translateX(-50%)",width:3,height:3,borderRadius:"50%",background:"#F59E0B"}}/>}
+                      {isHoli&&!isT&&<div style={{position:"absolute",bottom:0,left:"50%",transform:"translateX(-50%)",width:3,height:3,borderRadius:"50%",background:"#F87171"}}/>}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* プロジェクトビュー（プロジェクト別 → メンバー行ガント） */}
+              {view==="project"&&(projData.length===0
+                ?<div style={{padding:"40px 20px",fontSize:13,color:"#CCC",textAlign:"center"}}>この月にプロジェクトはありません</div>
+                :projData.map(({project:proj,memberRows},pi)=>{
+                  const isSel=selId===proj.id;
+                  const cflt=conflicts.some(c=>c.a.project.id===proj.id||c.b.project.id===proj.id);
+                  const{r:pr,g:pg,b:pb}=hex2rgb(proj.color.bg);
+                  return(
+                    <div key={proj.id} style={{borderBottom:pi<projData.length-1?"1px solid #ECEAE6":"none"}}>
+
+                      {/* ── プロジェクトヘッダー行 */}
+                      <div style={{display:"flex",alignItems:"stretch",height:40,
+                        background:isSel?"#F0EFEB":"#F8F7F5",borderBottom:"1px solid #F0EFEB",
+                        cursor:"pointer",transition:"background .15s"}}
+                        onClick={()=>setSelId(isSel?null:proj.id)}>
+                        <div style={{width:170,flexShrink:0,paddingLeft:16,paddingRight:10,display:"flex",alignItems:"center",gap:8}}>
+                          <div style={{width:6,height:22,borderRadius:2,background:proj.color.bg,flexShrink:0}}/>
+                          <span style={{fontSize:13,fontWeight:600,color:"#1A1A1A",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flex:1}}>{proj.name}</span>
+                          {cflt&&<span style={{fontSize:10,color:"#E11D48",flexShrink:0}}>⚠</span>}
+                        </div>
+                        <div style={{flex:1,position:"relative"}}><BgDecos height={40}/></div>
+                      </div>
+
+                      {/* ── メンバー行（この月にタスクがあるメンバーのみ） */}
+                      {memberRows.length===0
+                        ?<div style={{height:36,display:"flex",alignItems:"center",paddingLeft:36}}>
+                          <span style={{fontSize:11,color:"#DDD"}}>この月のタスクなし</span>
+                        </div>
+                        :memberRows.map(({member,items})=>(
+                          <div key={member?.id??'unassigned'}
+                            style={{display:"flex",alignItems:"stretch",height:RH,
+                              borderBottom:"1px solid #F5F4F0",
+                              background:isSel?"#FAFAF8":"transparent"}}>
+                            {/* 左：メンバー名 */}
+                            <div style={{width:170,flexShrink:0,paddingLeft:26,paddingRight:10,display:"flex",alignItems:"center",gap:6}}>
+                              {member
+                                ?<>
+                                  <div style={{width:20,height:20,borderRadius:"50%",background:member.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#fff",fontWeight:700,flexShrink:0}}>
+                                    {member.name.slice(0,1)}
+                                  </div>
+                                  <span style={{fontSize:12,color:"#555",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{member.name}</span>
+                                </>
+                                :<span style={{fontSize:11,color:"#BBB",border:"1px solid #EEE",padding:"2px 8px",borderRadius:10,whiteSpace:"nowrap"}}>未割当</span>
+                              }
+                            </div>
+                            {/* ガントバーエリア */}
+                            <div style={{flex:1,height:"100%",position:"relative"}}>
+                              <BgDecos height={RH}/>
+                              {items.map(({task,startDate,endDate,segs})=>{
+                                const cflt=isConflicted(proj.id,task.id,conflicts);
+                                const isHov=hovSeg?.pId===proj.id&&hovSeg?.tId===task.id;
+                                const sInM=new Date(startDate).getMonth()===mo&&new Date(startDate).getFullYear()===yr;
+                                const eInM=new Date(endDate).getMonth()===mo&&new Date(endDate).getFullYear()===yr;
+                                return segs.map((seg,si)=>{
+                                  const isFirst=si===0,isLast=si===segs.length-1;
+                                  const left=(seg.s-1)*DW,width=(seg.e-seg.s+1)*DW;
+                                  const lRad=isFirst&&sInM?3:0,rRad=isLast&&eInM?3:0;
+                                  const br=`${lRad}px ${rRad}px ${rRad}px ${lRad}px`;
+                                  return(
+                                    <div key={`${task.id}-${si}`} className="seg" style={{
+                                      position:"absolute",left,width,top:"50%",transform:"translateY(-50%)",height:22,
+                                      background:`rgba(${pr},${pg},${pb},.85)`,borderRadius:br,
+                                      boxShadow:cflt?`0 0 0 2px #E11D48`
+                                        :isHov?`0 2px 6px rgba(${pr},${pg},${pb},.4)`
+                                        :isSel?`0 1px 4px rgba(${pr},${pg},${pb},.3)`:"none",
+                                      display:"flex",alignItems:"center",paddingLeft:isFirst?6:2,overflow:"hidden",
+                                      zIndex:isHov?2:1,cursor:"pointer",
+                                    }}
+                                      title={`${task.name}（${task.days}日）${task.satOnly?" · 土曜固定":task.workSat?" · 土曜稼働":""}${cflt?" ⚠ 競合":""}`}
+                                      onMouseEnter={()=>setHovSeg({pId:proj.id,tId:task.id})}
+                                      onMouseLeave={()=>setHovSeg(null)}
+                                      onClick={()=>setSelId(isSel?null:proj.id)}
+                                    >
+                                      {isFirst&&cflt&&<span style={{fontSize:9,marginRight:3,flexShrink:0,color:"#fff"}}>⚠</span>}
+                                      {isFirst&&width>44&&<span style={{fontSize:10,color:"rgba(255,255,255,.92)",whiteSpace:"nowrap",fontWeight:500}}>{task.name}</span>}
+                                      {isFirst&&task.satOnly&&width>60&&<span style={{marginLeft:4,fontSize:8,background:"rgba(139,92,246,.5)",padding:"1px 4px",borderRadius:3,color:"#fff",flexShrink:0,fontWeight:600}}>土固</span>}
+                                      {isFirst&&task.workSat&&!task.satOnly&&width>60&&<span style={{marginLeft:4,fontSize:8,background:"rgba(255,255,255,.28)",padding:"1px 4px",borderRadius:3,color:"rgba(255,255,255,.9)",flexShrink:0,fontWeight:600}}>土</span>}
+                                    </div>
+                                  );
+                                });
+                              })}
+                            </div>
+                          </div>
+                        ))
+                      }
+                    </div>
+                  );
+                })
+              )}
+
+              {/* メンバービュー（ガントチャートスタイル） */}
+              {view==="member"&&mbrData.map(({member,tasks},mi)=>{
+                const mConflicts=conflicts.filter(c=>c.member?.id===member.id);
+                const hasCflt=mConflicts.length>0;
+                return(
+                  <div key={member.id} style={{borderBottom:mi<mbrData.length-1?"1px solid #ECEAE6":"none"}}>
+
+                    {/* ── メンバーヘッダー行 */}
+                    <div style={{display:"flex",alignItems:"stretch",height:40,background:"#F8F7F5",borderBottom:"1px solid #F0EFEB"}}>
+                      <div style={{width:170,flexShrink:0,paddingLeft:16,paddingRight:10,display:"flex",alignItems:"center",gap:8}}>
+                        <div style={{width:24,height:24,borderRadius:"50%",background:member.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#fff",fontWeight:700,flexShrink:0,position:"relative"}}>
+                          {member.name.slice(0,1)}
+                          {hasCflt&&<div style={{position:"absolute",top:-2,right:-2,width:8,height:8,borderRadius:"50%",background:"#E11D48",border:"1.5px solid #F8F7F5"}}/>}
+                        </div>
+                        <span style={{fontSize:13,fontWeight:600,color:"#1A1A1A",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{member.name}</span>
+                        {hasCflt&&<span style={{fontSize:10,color:"#E11D48",flexShrink:0,fontWeight:500}}>⚠{mConflicts.length}</span>}
+                      </div>
+                      <div style={{flex:1,position:"relative"}}><BgDecos height={40}/></div>
+                    </div>
+
+                    {/* ── タスク行（この月に稼働日があるものだけ） */}
+                    {tasks.length===0
+                      ?<div style={{display:"flex",alignItems:"center",height:36,paddingLeft:36}}>
+                        <span style={{fontSize:11,color:"#DDD"}}>この月のタスクなし</span>
+                      </div>
+                      :tasks.map(({task,startDate,endDate,project,segs})=>{
+                        const cflt=isConflicted(project.id,task.id,conflicts);
+                        const sInM=new Date(startDate).getMonth()===mo&&new Date(startDate).getFullYear()===yr;
+                        const eInM=new Date(endDate).getMonth()===mo&&new Date(endDate).getFullYear()===yr;
+                        const{r,g,b}=hex2rgb(project.color.bg);
+                        return(
+                          <div key={`${project.id}-${task.id}`}
+                            style={{display:"flex",alignItems:"stretch",height:RH,borderBottom:"1px solid #F5F4F0"}}>
+                            {/* 左ラベル：プロジェクト名 + タスク名 */}
+                            <div style={{width:170,flexShrink:0,paddingLeft:26,paddingRight:10,display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}
+                              onClick={()=>{setSelId(project.id);setView("project");}}>
+                              <div style={{width:6,height:6,borderRadius:1,background:project.color.bg,flexShrink:0,marginTop:1}}/>
+                              <div style={{flex:1,overflow:"hidden"}}>
+                                <div style={{fontSize:10,color:"#CCC",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",lineHeight:1.3}}>{project.name}</div>
+                                <div style={{fontSize:12,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontWeight:500,
+                                  color:cflt?"#E11D48":"#444",lineHeight:1.3}}>{cflt&&"⚠ "}{task.name}</div>
+                              </div>
+                            </div>
+                            {/* ガントバーエリア */}
+                            <div style={{flex:1,height:"100%",position:"relative"}}>
+                              <BgDecos height={RH}/>
+                              {segs.map((seg,si)=>{
+                                const isFirst=si===0,isLast=si===segs.length-1;
+                                const left=(seg.s-1)*DW,width=(seg.e-seg.s+1)*DW;
+                                const lRad=isFirst&&sInM?3:0,rRad=isLast&&eInM?3:0;
+                                const br=`${lRad}px ${rRad}px ${rRad}px ${lRad}px`;
+                                return(
+                                  <div key={si} className="seg" style={{
+                                    position:"absolute",left,width,top:"50%",transform:"translateY(-50%)",height:22,
+                                    background:`rgba(${r},${g},${b},.85)`,borderRadius:br,
+                                    boxShadow:cflt?"0 0 0 2px #E11D48":"none",
+                                    display:"flex",alignItems:"center",paddingLeft:isFirst?6:2,overflow:"hidden",
+                                  }}
+                                    title={`[${project.name}] ${task.name}（${task.days}日）${cflt?" ⚠ 競合":""}`}
+                                    onClick={()=>{setSelId(project.id);setView("project");}}
+                                  >
+                                    {isFirst&&cflt&&<span style={{fontSize:9,marginRight:2,color:"#fff",flexShrink:0}}>⚠</span>}
+                                    {isFirst&&width>44&&<span style={{fontSize:10,color:"rgba(255,255,255,.92)",whiteSpace:"nowrap",fontWeight:500}}>{task.name}</span>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })
+                    }
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* ── ホバーツールチップ */}
+          {hovSeg&&(()=>{
+            const proj=projects.find(p=>p.id===hovSeg.pId);if(!proj)return null;
+            const tds=taskDates(proj,members);
+            const tdIdx=tds.findIndex(x=>x.task.id===hovSeg.tId);if(tdIdx===-1)return null;
+            const td=tds[tdIdx];
+            const mbrs=(td.task.assigneeIds||[]).map(id=>getMbr(id)).filter(Boolean);
+            const cflt=isConflicted(proj.id,td.task.id,conflicts);
+            return(
+              <div style={{margin:"10px 28px 0",padding:"8px 14px",background:"#fff",border:"1px solid #E8E7E3",borderRadius:6,
+                display:"inline-flex",alignItems:"center",gap:12,fontSize:12,color:"#888",
+                boxShadow:"0 1px 4px rgba(0,0,0,.06)"}}>
+                <div style={{width:8,height:8,borderRadius:2,background:proj.color.bg,flexShrink:0}}/>
+                <span style={{color:"#1A1A1A",fontWeight:500}}>{td.task.name}</span>
+                <span style={{color:proj.color.bg,fontWeight:500}}>{td.task.days} 稼働日</span>
+                {mbrs.length>0&&(
+                  <span style={{display:"flex",alignItems:"center",gap:6,color:"#666"}}>
+                    {mbrs.map(m=>(
+                      <span key={m.id} style={{display:"flex",alignItems:"center",gap:4}}>
+                        <div style={{width:16,height:16,borderRadius:"50%",background:m.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:"#fff",fontWeight:700}}>{m.name.slice(0,1)}</div>
+                        {m.name}
+                      </span>
+                    ))}
+                  </span>
+                )}
+                <span style={{color:"#CCC"}}>{fmt(td.startDate)} → {fmt(td.endDate)}</span>
+                {td.task.satOnly&&<span style={{color:"#8B5CF6",fontSize:11,fontWeight:500}}>土曜固定</span>}
+                {td.task.workSat&&!td.task.satOnly&&<span style={{color:"#10B981",fontSize:11,fontWeight:500}}>土曜稼働</span>}
+                {tdIdx>0&&<span style={{color:"#DDD",fontSize:11}}>↳ 前タスク翌稼働日</span>}
+                {cflt&&<span style={{color:"#E11D48",fontWeight:500}}>⚠ 競合あり</span>}
+              </div>
+            );
+          })()}
+
+          {/* ── 競合パネル */}
+          {conflicts.length>0&&(
+            <div className="fi" style={{margin:"12px 28px 0",padding:"14px 18px",background:"#FFF8F9",border:"1px solid #FECDD3",borderRadius:8}}>
+              <div style={{fontSize:11,fontWeight:600,color:"#E11D48",letterSpacing:".04em",marginBottom:10}}>⚠ リソース競合</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {conflicts.map(c=>{
+                  const mbr=c.member;if(!mbr)return null;
+                  return(
+                    <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 12px",background:"#fff",border:"1px solid #FFE4E9",borderRadius:6}}>
+                      <div style={{width:22,height:22,borderRadius:"50%",background:mbr.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#fff",fontWeight:700,flexShrink:0}}>{mbr.name.slice(0,1)}</div>
+                      <span style={{fontSize:12,color:"#E11D48",fontWeight:500}}>{mbr.name}</span>
+                      <span style={{fontSize:12,color:"#CCC"}}>—</span>
+                      <span style={{fontSize:12,color:"#555"}}><span style={{color:c.a.project.color.bg,fontWeight:500}}>{c.a.project.name}</span> · {c.a.task.name}</span>
+                      <span style={{fontSize:11,color:"#DDD"}}>vs</span>
+                      <span style={{fontSize:12,color:"#555"}}><span style={{color:c.b.project.color.bg,fontWeight:500}}>{c.b.project.name}</span> · {c.b.task.name}</span>
+                      <span style={{fontSize:11,color:"#CCC",marginLeft:"auto",flexShrink:0}}>
+                        {fmt(c.a.startDate)} – {fmt(c.a.endDate)} ∩ {fmt(c.b.startDate)} – {fmt(c.b.endDate)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ── プロジェクト詳細 */}
+          {selProj&&view==="project"&&(()=>{
+            const tds=taskDates(selProj,members);
+            const end=projEnd(selProj,members);
+            const total=totalDays(selProj);
+            const{r,g,b}=hex2rgb(selProj.color.bg);
+            return(
+              <div className="fi" style={{margin:"12px 28px 0",padding:"18px 20px",background:"#fff",border:"1px solid #E8E7E3",borderRadius:8,borderTop:`3px solid ${selProj.color.bg}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+                  <div>
+                    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
+                      <div style={{fontSize:15,fontWeight:600,color:"#1A1A1A"}}>{selProj.name}</div>
+                    </div>
+                    <div style={{fontSize:12,color:"#AAA",marginBottom:2}}>
+                      {fmt(skipWe(new Date(selProj.startDate)))} → {fmt(end)}
+                      <span style={{margin:"0 6px",color:"#DDD"}}>·</span>
+                      合計 <span style={{color:selProj.color.bg,fontWeight:500}}>{total}</span> 稼働日
+                    </div>
+                    {selProj.description&&<div style={{fontSize:12,color:"#BBB"}}>{selProj.description}</div>}
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <button className="bg" onClick={()=>openEdit(selProj)}>編集</button>
+                    <button className="bg" onClick={()=>openDuplicate(selProj)} title="このプロジェクトをコピーして新規作成">複製</button>
+                    <button className="bg" onClick={()=>delProj(selProj.id)} style={{color:"#E11D48",borderColor:"#FECDD3"}}>削除</button>
+                  </div>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:0}}>
+                  {tds.map(({task,startDate,endDate:tEnd},idx)=>{
+                    const alpha=idx%2===0?.9:.6;
+                    const mbrs=(task.assigneeIds||[]).map(id=>getMbr(id)).filter(Boolean);
+                    const cflt=isConflicted(selProj.id,task.id,conflicts);
+                    const wPct=`${Math.round(task.days/total*100)}%`;
+                    return(
+                      <div key={task.id}>
+                        {idx>0&&(
+                          <div style={{display:"flex",alignItems:"center",gap:4,paddingLeft:30,margin:"2px 0"}}>
+                            <div style={{width:1,height:8,background:"#E8E7E3",marginLeft:1}}/>
+                            <span style={{fontSize:10,color:"#CCC"}}>↳ 翌稼働日スタート</span>
+                          </div>
+                        )}
+                        <div style={{padding:"8px 10px 8px 14px",background:cflt?"#FFF8F9":"#FAFAF8",
+                          borderLeft:`3px solid rgba(${r},${g},${b},${alpha})`,
+                          borderRadius:"0 4px 4px 0",marginBottom:2}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                            <span style={{fontSize:11,color:"#CCC",width:16,textAlign:"right"}}>{idx+1}</span>
+                            <span style={{flex:1,fontSize:13,color:"#2A2A2A",fontWeight:500}}>{task.name}</span>
+                            {task.satOnly&&<span style={{fontSize:10,color:"#8B5CF6",background:"#F5F3FF",border:"1px solid #DDD6FE",padding:"1px 6px",borderRadius:10,fontWeight:500,flexShrink:0}}>土曜固定</span>}
+                            {task.workSat&&!task.satOnly&&<span style={{fontSize:10,color:"#10B981",background:"#F0FDF4",border:"1px solid #BBF7D0",padding:"1px 6px",borderRadius:10,fontWeight:500,flexShrink:0}}>土曜稼働</span>}
+                            {cflt&&<span style={{fontSize:11,color:"#E11D48",fontWeight:500}}>⚠ 競合</span>}
+                            {mbrs.length>0
+                              ?<div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                                {mbrs.map(m=>(
+                                  <div key={m.id} style={{display:"flex",alignItems:"center",gap:5,padding:"3px 8px",background:`rgba(${hex2rgb(m.color).r},${hex2rgb(m.color).g},${hex2rgb(m.color).b},.1)`,borderRadius:12}}>
+                                    <div style={{width:12,height:12,borderRadius:"50%",background:m.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:7,color:"#fff",fontWeight:700}}>{m.name.slice(0,1)}</div>
+                                    <span style={{fontSize:11,color:"#555"}}>{m.name}</span>
+                                  </div>
+                                ))}
+                              </div>
+                              :<span style={{fontSize:11,color:"#CCC",padding:"3px 8px",border:"1px solid #EEE",borderRadius:12}}>未割当</span>}
+                            <span style={{fontSize:12,color:`rgba(${r},${g},${b},${alpha})`,fontWeight:500}}>{task.days}日</span>
+                            <span style={{fontSize:11,color:"#BBB"}}>{fmt(startDate)} – {fmt(tEnd)}</span>
+                          </div>
+                          <div style={{marginLeft:24,height:3,background:"#EEE",borderRadius:2}}>
+                            <div style={{width:wPct,height:"100%",background:`rgba(${r},${g},${b},${alpha})`,borderRadius:2}}/>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ── プロジェクト一覧 */}
+          <div style={{padding:"20px 28px 48px"}}>
+            <div style={{fontSize:11,fontWeight:600,color:"#BBB",letterSpacing:".06em",marginBottom:10}}>すべてのプロジェクト（{projects.length}件）</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(210px,1fr))",gap:8}}>
+              {projects.map(p=>{
+                const end=projEnd(p,members);const total=totalDays(p);const isSel=selId===p.id;
+                const cflt=conflicts.some(c=>c.a.project.id===p.id||c.b.project.id===p.id);
+                return(
+                  <div key={p.id} className="pcard" onClick={()=>{setSelId(isSel?null:p.id);setView("project");}}
+                    style={{background:isSel?"#F0EFEB":"#fff",border:"1px solid #E8E7E3",
+                      borderTop:`3px solid ${p.color.bg}`,padding:"10px 12px",position:"relative"}}>
+                    {/* 右上：競合 or 複製ボタン群 */}
+                    <div style={{position:"absolute",top:7,right:8,display:"flex",gap:4,alignItems:"center"}}>
+                      {cflt&&<span style={{fontSize:10,color:"#E11D48"}}>⚠</span>}
+                      <button
+                        onClick={e=>{e.stopPropagation();openDuplicate(p);}}
+                        title="複製して新規プロジェクト作成"
+                        style={{background:"transparent",border:"none",cursor:"pointer",fontSize:13,color:"#CCC",padding:"0 2px",lineHeight:1,transition:"color .15s"}}
+                        onMouseEnter={e=>e.target.style.color="#888"}
+                        onMouseLeave={e=>e.target.style.color="#CCC"}
+                      >⧉</button>
+                    </div>
+                    <div style={{fontSize:13,color:"#1A1A1A",marginBottom:4,fontWeight:500,paddingRight:28}}>{p.name}</div>
+                    <div style={{fontSize:11,color:"#BBB"}}>{fmt(p.startDate)} → {fmt(end)}</div>
+                    <div style={{fontSize:11,color:"#CCC",marginTop:3}}>{p.tasks.length}タスク · <span style={{color:p.color.bg}}>{total}</span> 稼働日</div>
+                  </div>
+                );
+              })}
+              <div className="pcard" onClick={openAdd} style={{background:"#FAFAF8",border:"1px dashed #DDD",padding:"10px 12px",display:"flex",alignItems:"center",justifyContent:"center",minHeight:72}}>
+                <span style={{fontSize:12,color:"#CCC"}}>+ プロジェクト追加</span>
+              </div>
+            </div>
+          </div>
+
+          {/* ── 編集モーダル */}
+          {/* ── Excel出力モーダル */}
+          {showExpModal&&(
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:20}}
+              onClick={e=>{if(e.target===e.currentTarget)setShowExpModal(false);}}>
+              <div style={{background:"#fff",border:"1px solid #E8E7E3",borderRadius:10,width:"100%",maxWidth:480,padding:28,boxShadow:"0 8px 32px rgba(0,0,0,.14)",maxHeight:"90vh",overflowY:"auto"}}>
+                <div style={{fontSize:16,fontWeight:600,marginBottom:22,color:"#1A1A1A",display:"flex",alignItems:"center",gap:10}}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#217346" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/><path d="M6 14l2 2-2 2M13 14h4M13 18h4" strokeWidth="1.8"/>
+                  </svg>
+                  Excel出力
+                </div>
+
+                {/* プロジェクト選択 */}
+                <div style={{marginBottom:22}}>
+                  <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:10}}>出力するプロジェクト</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                    {/* 全選択トグル */}
+                    <label style={{display:"flex",alignItems:"center",gap:8,padding:"4px 8px",borderRadius:5,cursor:"pointer",
+                      background:expSelIds.length===projects.length?"#F0F9F0":"transparent",
+                      border:expSelIds.length===projects.length?"1px solid #D1EDD4":"1px solid transparent",
+                    }}>
+                      <input type="checkbox"
+                        checked={expSelIds.length===projects.length}
+                        onChange={e=>setExpSelIds(e.target.checked?projects.map(p=>p.id):[])}
+                        style={{width:14,height:14,accentColor:"#217346"}}
+                      />
+                      <span style={{fontSize:12,color:"#444",fontWeight:500}}>すべて選択</span>
+                    </label>
+                    <div style={{height:1,background:"#F0EFEB",margin:"4px 0"}}/>
+                    {projects.map(p=>{
+                      const sel=expSelIds.includes(p.id);
+                      const end=projEnd(p,members);
+                      const endStr=`${end.getMonth()+1}/${end.getDate()}`;
+                      return(
+                        <label key={p.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 8px",borderRadius:5,cursor:"pointer",
+                          background:sel?"#F8FCF8":"transparent",border:sel?"1px solid #D1EDD4":"1px solid transparent",transition:"all .1s"}}>
+                          <input type="checkbox" checked={sel}
+                            onChange={e=>setExpSelIds(ids=>e.target.checked?[...ids,p.id]:ids.filter(x=>x!==p.id))}
+                            style={{width:14,height:14,accentColor:"#217346",flexShrink:0}}
+                          />
+                          <div style={{width:10,height:10,borderRadius:2,background:p.color.bg,flexShrink:0}}/>
+                          <span style={{fontSize:12,color:"#1A1A1A",flex:1}}>{p.name}</span>
+                          <span style={{fontSize:10,color:"#AAA",flexShrink:0}}>{p.startDate.slice(5).replace('-','/')} 〜 {endStr}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 出力期間 */}
+                <div style={{marginBottom:22}}>
+                  <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:10}}>出力期間</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    <label style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:6,cursor:"pointer",
+                      border:expRangeMode==='project'?"1.5px solid #217346":"1px solid #E8E7E3",
+                      background:expRangeMode==='project'?"#F5FCF5":"transparent",transition:"all .15s"}}>
+                      <input type="radio" name="rangeMode" value="project"
+                        checked={expRangeMode==='project'} onChange={()=>setExpRangeMode('project')}
+                        style={{accentColor:"#217346"}}
+                      />
+                      <div>
+                        <div style={{fontSize:13,fontWeight:500,color:"#1A1A1A"}}>プロジェクト全期間</div>
+                        <div style={{fontSize:11,color:"#888",marginTop:1}}>選択したプロジェクトの開始日〜終了日</div>
+                      </div>
+                    </label>
+                    <label style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:6,cursor:"pointer",
+                      border:expRangeMode==='custom'?"1.5px solid #217346":"1px solid #E8E7E3",
+                      background:expRangeMode==='custom'?"#F5FCF5":"transparent",transition:"all .15s"}}>
+                      <input type="radio" name="rangeMode" value="custom"
+                        checked={expRangeMode==='custom'} onChange={()=>setExpRangeMode('custom')}
+                        style={{accentColor:"#217346"}}
+                      />
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:13,fontWeight:500,color:"#1A1A1A",marginBottom:6}}>期間を指定</div>
+                        {expRangeMode==='custom'&&(
+                          <div style={{display:"flex",alignItems:"center",gap:8}}>
+                            <input type="date" value={expStart} onChange={e=>setExpStart(e.target.value)}
+                              style={{flex:1,padding:"5px 8px",fontSize:12,border:"1px solid #D1D0CC",borderRadius:4,background:"#fff"}}/>
+                            <span style={{fontSize:12,color:"#AAA",flexShrink:0}}>〜</span>
+                            <input type="date" value={expEnd} onChange={e=>setExpEnd(e.target.value)}
+                              style={{flex:1,padding:"5px 8px",fontSize:12,border:"1px solid #D1D0CC",borderRadius:4,background:"#fff"}}/>
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* 出力プレビュー */}
+                <div style={{background:"#F8F7F5",border:"1px solid #ECEAE6",borderRadius:6,padding:"10px 14px",marginBottom:22,minHeight:44}}>
+                  {expSelIds.length===0
+                    ?<span style={{fontSize:12,color:"#CCC"}}>プロジェクトを1つ以上選択してください</span>
+                    :expEffectiveRange
+                      ?<div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                        <span style={{fontSize:12,color:"#444",fontWeight:500}}>
+                          {`${expEffectiveRange.start.getFullYear()}年${expEffectiveRange.start.getMonth()+1}月${expEffectiveRange.start.getDate()}日`}
+                          <span style={{color:"#AAA",margin:"0 6px"}}>〜</span>
+                          {`${expEffectiveRange.end.getFullYear()}年${expEffectiveRange.end.getMonth()+1}月${expEffectiveRange.end.getDate()}日`}
+                        </span>
+                        <span style={{background:"#217346",color:"#fff",fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:10}}>{expEffectiveRange.days}日間</span>
+                        <span style={{fontSize:11,color:"#AAA"}}>{expSelIds.length}プロジェクト</span>
+                      </div>
+                      :<span style={{fontSize:12,color:"#E11D48"}}>期間を正しく入力してください</span>
+                  }
+                </div>
+
+                {/* ボタン */}
+                <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+                  <button className="bg" onClick={()=>setShowExpModal(false)}>キャンセル</button>
+                  <button
+                    onClick={()=>{
+                      if(!expEffectiveRange||!expSelIds.length)return;
+                      runExportGanttExcel(expSelIds,expEffectiveRange.start,expEffectiveRange.end);
+                      setShowExpModal(false);
+                    }}
+                    disabled={!expEffectiveRange||!expSelIds.length}
+                    style={{padding:"8px 20px",background:expEffectiveRange&&expSelIds.length?"#217346":"#D1D0CC",
+                      color:"#fff",border:"none",borderRadius:6,fontSize:13,fontWeight:600,cursor:expEffectiveRange&&expSelIds.length?"pointer":"not-allowed"}}>
+                    ダウンロード
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showModal&&form&&(
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.35)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:20}}
+              onClick={e=>{if(e.target===e.currentTarget)setShowModal(false);}}>
+              <div className="fi mw" style={{background:"#fff",border:"1px solid #E8E7E3",borderRadius:10,width:"100%",maxWidth:540,padding:28,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,.12)"}}>
+                <div style={{fontSize:16,fontWeight:600,marginBottom:20,color:"#1A1A1A",display:"flex",alignItems:"center",gap:10}}>
+                  {editProj?"プロジェクト編集":isDuplicate?"プロジェクトを複製":"新規プロジェクト"}
+                  {isDuplicate&&<span style={{fontSize:11,color:"#10B981",background:"#F0FDF4",border:"1px solid #BBF7D0",padding:"2px 8px",borderRadius:10,fontWeight:500}}>タスク・設定を引き継ぎ</span>}
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                  <div>
+                    <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:5}}>プロジェクト名</div>
+                    <input className="if" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="プロジェクト名"/>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                    <div>
+                      <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:5}}>開始日</div>
+                      <input className="if" type="date" value={form.startDate} onChange={e=>setForm(f=>({...f,startDate:e.target.value}))}/>
+                    </div>
+                    <div>
+                      <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:5}}>自動計算 終了日</div>
+                      <div style={{background:"#F8F7F5",border:"1px solid #EEE",padding:"8px 10px",fontSize:13,color:computedEnd?"#10B981":"#CCC",borderRadius:4,fontWeight:computedEnd?500:400}}>
+                        {computedEnd?fmt(computedEnd):"—"}
+                        {form.tasks.length>0&&<span style={{fontSize:11,color:"#CCC",marginLeft:6}}>（{form.tasks.reduce((s,t)=>s+(parseInt(t.days)||0),0)}日）</span>}
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:8}}>カラー</div>
+                    <div style={{display:"flex",gap:8}}>
+                      {PCOLS.map(c=>(
+                        <div key={c.id} onClick={()=>setForm(f=>({...f,colorId:c.id}))}
+                          style={{width:24,height:24,borderRadius:6,background:c.bg,cursor:"pointer",transition:"transform .12s, box-shadow .12s",
+                                  boxShadow:form.colorId===c.id?`0 0 0 2px #fff, 0 0 0 4px ${c.bg}`:"none",
+                                  transform:form.colorId===c.id?"scale(1.15)":"scale(1)"}}/>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em",marginBottom:5}}>メモ（任意）</div>
+                    <input className="if" value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="備考など"/>
+                  </div>
+
+                  {/* タスクリスト */}
+                  <div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <div style={{fontSize:11,fontWeight:600,color:"#AAA",letterSpacing:".06em"}}>タスク（{form.tasks.length}件）</div>
+                        <div style={{fontSize:10,color:"#CCC"}}>順番 = 依存順序 · ⠿ ドラッグで並び替え</div>
+                      </div>
+                      <button className="bs" onClick={addTask}>+ 追加</button>
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                      {form.tasks.map((t,idx)=>{
+                        const cflt=formConflictIds.has(t.id);
+                        const isDragging=dragIdx.current===idx;
+                        const isDragOver=dragOverIdx===idx&&dragIdx.current!==null&&dragIdx.current!==idx;
+                        return(
+                          <div key={t.id}>
+                            {isDragOver&&dragIdx.current>idx&&<div style={{height:2,background:"#38BDF8",borderRadius:1,marginBottom:2}}/>}
+                            <div draggable
+                              onDragStart={()=>handleDragStart(idx)}
+                              onDragOver={e=>handleDragOver(e,idx)}
+                              onDrop={()=>handleDrop(idx)}
+                              onDragEnd={handleDragEnd}
+                              style={{display:"flex",flexDirection:"column",gap:6,padding:"6px 0",
+                                opacity:isDragging?.4:1,
+                                background:isDragOver?"rgba(56,189,248,.06)":"transparent",
+                                transition:"opacity .1s",borderRadius:4}}>
+                              {/* 上段：タスク名・日数・土曜・操作 */}
+                              <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                                <span className="drag-handle">⠿</span>
+                                <span style={{fontSize:10,color:"#CCC",width:14,textAlign:"right",flexShrink:0}}>{idx+1}</span>
+                                <input className="if" style={{flex:1}} value={t.name} onChange={e=>updTask(t.id,"name",e.target.value)} placeholder={`タスク ${idx+1}`}/>
+                                <input className="if" type="number" min="1" value={t.days} onChange={e=>updTask(t.id,"days",e.target.value)} style={{width:54}}/>
+                                <span style={{fontSize:11,color:"#CCC",flexShrink:0}}>日</span>
+                                {/* 土曜稼働スイッチ（土固ONのときは無効） */}
+                                <div title={t.satOnly?"土固ONのため無効":t.workSat?"土曜稼働あり（クリックで解除）":"土曜稼働なし（クリックで有効）"}
+                                  onClick={()=>{if(!t.satOnly)updTask(t.id,"workSat",!(t.workSat||false));}}
+                                  style={{display:"flex",alignItems:"center",gap:3,cursor:t.satOnly?"default":"pointer",flexShrink:0,userSelect:"none",opacity:t.satOnly?.3:1,transition:"opacity .2s"}}>
+                                  <div style={{width:28,height:15,borderRadius:8,background:t.workSat&&!t.satOnly?"#10B981":"#E0DFDB",position:"relative",transition:"background .2s",flexShrink:0}}>
+                                    <div style={{position:"absolute",top:2,left:t.workSat&&!t.satOnly?13:2,width:11,height:11,borderRadius:"50%",background:"#fff",transition:"left .15s",boxShadow:"0 1px 3px rgba(0,0,0,.2)"}}/>
+                                  </div>
+                                  <span style={{fontSize:10,color:t.workSat&&!t.satOnly?"#10B981":"#CCC",fontWeight:600,minWidth:10}}>土</span>
+                                </div>
+                                {/* 土曜固定スイッチ */}
+                                <div title={t.satOnly?"土曜固定（クリックで解除）":"土曜のみ稼働に固定（クリックで有効）"}
+                                  onClick={()=>{
+                                    const so=!(t.satOnly||false);
+                                    setForm(f=>({...f,tasks:f.tasks.map(x=>x.id===t.id?{...x,satOnly:so,workSat:so?false:x.workSat}:x)}));
+                                  }}
+                                  style={{display:"flex",alignItems:"center",gap:3,cursor:"pointer",flexShrink:0,userSelect:"none"}}>
+                                  <div style={{width:28,height:15,borderRadius:8,background:t.satOnly?"#8B5CF6":"#E0DFDB",position:"relative",transition:"background .2s",flexShrink:0}}>
+                                    <div style={{position:"absolute",top:2,left:t.satOnly?13:2,width:11,height:11,borderRadius:"50%",background:"#fff",transition:"left .15s",boxShadow:"0 1px 3px rgba(0,0,0,.2)"}}/>
+                                  </div>
+                                  <span style={{fontSize:10,color:t.satOnly?"#8B5CF6":"#CCC",fontWeight:600,minWidth:14}}>土固</span>
+                                </div>
+                                <button className="bs" disabled={idx===0} onClick={()=>mvTask(t.id,-1)}>↑</button>
+                                <button className="bs" disabled={idx===form.tasks.length-1} onClick={()=>mvTask(t.id,1)}>↓</button>
+                                <button className="bs" style={{color:"#EF4444",borderColor:"#FCA5A5"}} onClick={()=>delTask(t.id)}>✕</button>
+                              </div>
+                              {/* 下段：メンバー複数選択チップ */}
+                              <div style={{display:"flex",flexWrap:"wrap",gap:4,paddingLeft:22,alignItems:"center"}}>
+                                <span style={{fontSize:10,color:"#CCC",flexShrink:0}}>担当：</span>
+                                {members.length===0
+                                  ?<span style={{fontSize:11,color:"#DDD"}}>メンバーなし</span>
+                                  :members.map(m=>{
+                                    const sel=(t.assigneeIds||[]).includes(m.id);
+                                    const{r:mr,g:mg,b:mb}=hex2rgb(m.color);
+                                    return(
+                                      <div key={m.id} onClick={()=>toggleAssignee(t.id,m.id)}
+                                        style={{display:"flex",alignItems:"center",gap:4,padding:"2px 8px",
+                                          borderRadius:10,cursor:"pointer",userSelect:"none",
+                                          background:sel?`rgba(${mr},${mg},${mb},.12)`:"transparent",
+                                          border:`1px solid ${sel?m.color:"#E5E5E5"}`,
+                                          transition:"all .12s"}}>
+                                        <div style={{width:8,height:8,borderRadius:"50%",background:m.color,flexShrink:0}}/>
+                                        <span style={{fontSize:11,color:sel?"#1A1A1A":"#AAA",fontWeight:sel?500:400}}>{m.name}</span>
+                                      </div>
+                                    );
+                                  })
+                                }
+                              </div>
+                            </div>
+                            {isDragOver&&dragIdx.current<idx&&<div style={{height:2,background:"#38BDF8",borderRadius:1,marginTop:2}}/>}
+                            {cflt&&<div style={{marginLeft:26,fontSize:11,color:"#E11D48",marginTop:3}}>⚠ このメンバーは同期間に別タスクがあります</div>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+                {formErr&&<div style={{fontSize:12,color:"#E11D48",marginTop:12}}>{formErr}</div>}
+                <div style={{display:"flex",gap:10,marginTop:22,justifyContent:"flex-end"}}>
+                  <button className="bg" onClick={()=>setShowModal(false)}>キャンセル</button>
+                  <button className="bp" onClick={submitForm}>{editProj?"更新する":isDuplicate?"複製して追加":"追加する"}</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
