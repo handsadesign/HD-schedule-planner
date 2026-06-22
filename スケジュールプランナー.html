@@ -274,6 +274,7 @@
       const[dbxLastSync,setDbxLastSync]=useState(()=>localStorage.getItem('dbx_last_sync')||null);
       const[dbxConflict,setDbxConflict]=useState(null);
       const[showDbxSetup,setShowDbxSetup]=useState(false);
+      const[dbxErrDetail,setDbxErrDetail]=useState('');
       const dragIdx=useRef(null);
       const dbxTimerRef=useRef(null);
       const dbxInitRef=useRef(false);
@@ -513,6 +514,7 @@
           res=await fetch('https://content.dropboxapi.com/2/files/upload',
             {method:'POST',headers:headers(nt),body});
         }
+        if(!res.ok){const t=await res.text();console.error('Dropbox upload error',res.status,t);setDbxErrDetail(res.status+': '+t.slice(0,120));}
         return res.ok;
       };
 
@@ -528,6 +530,8 @@
         }
         if(res.ok)return res.json();
         if(res.status===409)return null; // ファイル未作成（初回）
+        const t=await res.text();console.error('Dropbox download error',res.status,t);
+        setDbxErrDetail(res.status+': '+t.slice(0,120));
         return undefined; // エラー
       };
 
@@ -876,9 +880,11 @@
                   </button>
                 :<div style={{display:"flex",alignItems:"center",gap:6}}>
                     <svg width="11" height="11" viewBox="0 0 40 40" fill={dbxStatus==='error'?"#E11D48":"#0061FF"}><path d="M20 7.3L10 13.6l10 6.4 10-6.4L20 7.3zM10 26.4l10 6.3 10-6.3-10-6.4-10 6.4zM10 13.6L0 20l10 6.4 10-6.4L10 13.6zM30 13.6l-10 6.4 10 6.4 10-6.4-10-6.4z"/></svg>
-                    <span style={{fontSize:11,color:dbxStatus==='error'?"#E11D48":dbxStatus==='syncing'?"#888":dbxStatus==='conflict'?"#D97706":"#0061FF"}}>
+                    <span title={dbxErrDetail||undefined}
+                      style={{fontSize:11,color:dbxStatus==='error'?"#E11D48":dbxStatus==='syncing'?"#888":dbxStatus==='conflict'?"#D97706":"#0061FF",
+                        cursor:dbxErrDetail?'help':'default'}}>
                       {dbxStatus==='syncing'?'同期中...'
-                       :dbxStatus==='error'?'同期エラー'
+                       :dbxStatus==='error'?`同期エラー${dbxErrDetail?' ⓘ':''}`
                        :dbxStatus==='conflict'?'更新あり'
                        :dbxLastSync?fmtTime(new Date(dbxLastSync)):'接続済'}
                     </span>
