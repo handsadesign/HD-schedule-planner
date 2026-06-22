@@ -273,6 +273,7 @@
       const[dbxStatus,setDbxStatus]=useState('idle'); // 'idle'|'syncing'|'ok'|'error'|'conflict'
       const[dbxLastSync,setDbxLastSync]=useState(()=>localStorage.getItem('dbx_last_sync')||null);
       const[dbxConflict,setDbxConflict]=useState(null);
+      const[showDbxSetup,setShowDbxSetup]=useState(false);
       const dragIdx=useRef(null);
       const dbxTimerRef=useRef(null);
       const dbxInitRef=useRef(false);
@@ -463,14 +464,19 @@
       };
 
       // ─── Dropbox連携 ────────────────────────────────────────────────────────
-      const connectDropbox=async()=>{
+      const dbxRedirectUri=()=>location.origin+'/';
+
+      const connectDropbox=()=>setShowDbxSetup(true);
+
+      const doConnectDropbox=async()=>{
+        setShowDbxSetup(false);
         const arr=new Uint8Array(32);crypto.getRandomValues(arr);
         const verifier=btoa(String.fromCharCode(...arr)).replace(/[^a-zA-Z0-9]/g,'');
         const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier));
         const challenge=btoa(String.fromCharCode(...new Uint8Array(digest)))
           .replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
         sessionStorage.setItem('dbx_v',verifier);
-        const redir=location.origin+'/';
+        const redir=dbxRedirectUri();
         location.href='https://www.dropbox.com/oauth2/authorize?'+new URLSearchParams({
           response_type:'code',client_id:DBX_APP_KEY,redirect_uri:redir,
           code_challenge:challenge,code_challenge_method:'S256',token_access_type:'offline'});
@@ -1407,6 +1413,43 @@
             </div>
           </div>
 
+          {/* ── Dropbox設定モーダル */}
+          {showDbxSetup&&(
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:20}}
+              onClick={e=>{if(e.target===e.currentTarget)setShowDbxSetup(false);}}>
+              <div style={{background:"#fff",border:"1px solid #E8E7E3",borderRadius:10,width:"100%",maxWidth:460,padding:28,boxShadow:"0 8px 32px rgba(0,0,0,.14)"}}>
+                <div style={{fontSize:15,fontWeight:600,marginBottom:6,display:"flex",alignItems:"center",gap:8}}>
+                  <svg width="18" height="18" viewBox="0 0 40 40" fill="#0061FF"><path d="M20 7.3L10 13.6l10 6.4 10-6.4L20 7.3zM10 26.4l10 6.3 10-6.3-10-6.4-10 6.4zM10 13.6L0 20l10 6.4 10-6.4L10 13.6zM30 13.6l-10 6.4 10 6.4 10-6.4-10-6.4z"/></svg>
+                  Dropbox連携の設定
+                </div>
+                <p style={{fontSize:12,color:"#666",marginBottom:16,lineHeight:1.6}}>
+                  初回のみ、Dropboxアプリに以下のURLを登録する必要があります。<br/>
+                  登録済みの場合はそのまま「接続する」を押してください。
+                </p>
+                <div style={{fontSize:11,fontWeight:600,color:"#888",letterSpacing:".06em",marginBottom:6}}>① Dropboxアプリに登録するRedirect URI</div>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:20}}>
+                  <code style={{flex:1,background:"#F3F4F6",border:"1px solid #E5E7EB",borderRadius:5,padding:"8px 10px",fontSize:12,color:"#1A1A1A",wordBreak:"break-all"}}>
+                    {dbxRedirectUri()}
+                  </code>
+                  <button onClick={()=>navigator.clipboard.writeText(dbxRedirectUri())}
+                    style={{padding:"6px 10px",background:"#F3F4F6",border:"1px solid #E5E7EB",borderRadius:5,fontSize:11,cursor:"pointer",flexShrink:0,color:"#555"}}>
+                    コピー
+                  </button>
+                </div>
+                <div style={{fontSize:11,color:"#AAA",marginBottom:20,lineHeight:1.6}}>
+                  登録先：<a href="https://www.dropbox.com/developers/apps" target="_blank" rel="noreferrer" style={{color:"#0061FF"}}>dropbox.com/developers/apps</a>
+                  　→ HD-Schedule-Planner → OAuth 2 → Redirect URIs
+                </div>
+                <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                  <button className="bg" onClick={()=>setShowDbxSetup(false)}>キャンセル</button>
+                  <button onClick={doConnectDropbox}
+                    style={{padding:"8px 20px",background:"#0061FF",color:"#fff",border:"none",borderRadius:6,fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                    接続する
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           {/* ── 編集モーダル */}
           {/* ── Excel出力モーダル */}
           {showExpModal&&(
