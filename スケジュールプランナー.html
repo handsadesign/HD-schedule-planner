@@ -465,7 +465,7 @@
       };
 
       // ─── Dropbox連携 ────────────────────────────────────────────────────────
-      const dbxRedirectUri=()=>location.origin+'/';
+      const dbxRedirectUri=()=>location.origin+location.pathname.replace(/[^/]+$/,'');
 
       const connectDropbox=()=>setShowDbxSetup(true);
 
