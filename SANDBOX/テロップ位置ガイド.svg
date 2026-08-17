@@ -32,18 +32,18 @@
     <rect x="900" y="220" width="180" height="1280" fill="none" stroke="#c03535" stroke-width="3" stroke-dasharray="14 10"/>
     <!-- アイコンのイメージ -->
     <g fill="#c03535" opacity="0.85">
-      <circle cx="990" cy="760" r="42"/>
-      <circle cx="990" cy="900" r="42"/>
-      <circle cx="990" cy="1040" r="42"/>
-      <circle cx="990" cy="1180" r="42"/>
+      <circle cx="990" cy="860" r="42"/>
+      <circle cx="990" cy="1000" r="42"/>
+      <circle cx="990" cy="1140" r="42"/>
+      <circle cx="990" cy="1280" r="42"/>
     </g>
     <g fill="#fff" font-size="34" text-anchor="middle">
-      <text x="990" y="773">♥</text>
-      <text x="990" y="913">💬</text>
-      <text x="990" y="1053">➤</text>
-      <text x="990" y="1193">…</text>
+      <text x="990" y="873">♥</text>
+      <text x="990" y="1013">💬</text>
+      <text x="990" y="1153">➤</text>
+      <text x="990" y="1293">…</text>
     </g>
-    <text x="965" y="330" font-size="34" fill="#c03535" font-weight="bold" style="writing-mode: vertical-rl;">右 180px:いいね・コメント列</text>
+    <text transform="translate(1000,300) rotate(90)" font-size="32" fill="#c03535" font-weight="bold">右180px:アイコン列</text>
 
     <!-- 下部 危険ゾーン -->
     <rect x="0" y="1500" width="1080" height="420" fill="url(#hatch)"/>
