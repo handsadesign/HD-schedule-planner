@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 2100" font-family="'Hiragino Sans','Yu Gothic',sans-serif">
+  <!-- タイトル -->
+  <rect x="0" y="0" width="1080" height="120" fill="#ffffff"/>
+  <text x="540" y="58" text-anchor="middle" font-size="44" font-weight="bold" fill="#222">縦動画(9:16)テロップ位置ガイド</text>
+  <text x="540" y="104" text-anchor="middle" font-size="30" fill="#666">赤=各アプリのUIに隠れる/緑枠=安全な範囲</text>
+
+  <!-- スマホ画面(1080x1920 を y=140 から配置) -->
+  <g transform="translate(0,140)">
+    <!-- 映像エリア背景 -->
+    <rect x="0" y="0" width="1080" height="1920" fill="#efe9df"/>
+    <rect x="0" y="0" width="1080" height="1920" fill="url(#floor)" opacity="0.5"/>
+    <defs>
+      <linearGradient id="floor" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#dce6dc"/>
+        <stop offset="0.55" stop-color="#efe9df"/>
+        <stop offset="1" stop-color="#d9c9ae"/>
+      </linearGradient>
+      <pattern id="hatch" width="28" height="28" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect width="28" height="28" fill="#d64545" opacity="0.14"/>
+        <line x1="0" y1="0" x2="0" y2="28" stroke="#d64545" stroke-width="7" opacity="0.28"/>
+      </pattern>
+    </defs>
+
+    <!-- 上部 危険ゾーン -->
+    <rect x="0" y="0" width="1080" height="220" fill="url(#hatch)"/>
+    <rect x="0" y="0" width="1080" height="220" fill="none" stroke="#c03535" stroke-width="3" stroke-dasharray="14 10"/>
+    <rect x="180" y="70" width="720" height="80" rx="14" fill="#c03535"/>
+    <text x="540" y="124" text-anchor="middle" font-size="38" fill="#fff">上 220px:ユーザー名などのUIと被る</text>
+
+    <!-- 右側 危険ゾーン(アイコン列) -->
+    <rect x="900" y="220" width="180" height="1280" fill="url(#hatch)"/>
+    <rect x="900" y="220" width="180" height="1280" fill="none" stroke="#c03535" stroke-width="3" stroke-dasharray="14 10"/>
+    <!-- アイコンのイメージ -->
+    <g fill="#c03535" opacity="0.85">
+      <circle cx="990" cy="760" r="42"/>
+      <circle cx="990" cy="900" r="42"/>
+      <circle cx="990" cy="1040" r="42"/>
+      <circle cx="990" cy="1180" r="42"/>
+    </g>
+    <g fill="#fff" font-size="34" text-anchor="middle">
+      <text x="990" y="773">♥</text>
+      <text x="990" y="913">💬</text>
+      <text x="990" y="1053">➤</text>
+      <text x="990" y="1193">…</text>
+    </g>
+    <text x="965" y="330" font-size="34" fill="#c03535" font-weight="bold" style="writing-mode: vertical-rl;">右 180px:いいね・コメント列</text>
+
+    <!-- 下部 危険ゾーン -->
+    <rect x="0" y="1500" width="1080" height="420" fill="url(#hatch)"/>
+    <rect x="0" y="1500" width="1080" height="420" fill="none" stroke="#c03535" stroke-width="3" stroke-dasharray="14 10"/>
+    <rect x="120" y="1580" width="840" height="80" rx="14" fill="#c03535"/>
+    <text x="540" y="1634" text-anchor="middle" font-size="38" fill="#fff">下 420px:キャプション・音源表示と被る</text>
+    <text x="540" y="1720" text-anchor="middle" font-size="32" fill="#8f2b2b">(Pinterestでは右下に保存ボタンも出る)</text>
+
+    <!-- セーフゾーン -->
+    <rect x="70" y="270" width="790" height="1180" fill="none" stroke="#2f9e44" stroke-width="6" stroke-dasharray="24 14"/>
+    <rect x="90" y="292" width="620" height="70" rx="12" fill="#2f9e44"/>
+    <text x="400" y="340" text-anchor="middle" font-size="36" fill="#fff">セーフゾーン:文字はこの中に</text>
+
+    <!-- テロップ推奨位置(縦書き) -->
+    <rect x="700" y="420" width="130" height="900" rx="16" fill="#2b6cb0" opacity="0.12"/>
+    <rect x="700" y="420" width="130" height="900" rx="16" fill="none" stroke="#2b6cb0" stroke-width="4"/>
+    <text x="765" y="470" font-size="46" fill="#333" style="writing-mode: vertical-rl;">マンションリノベーションをして</text>
+
+    <!-- 引き出し線と注釈 -->
+    <line x1="700" y1="870" x2="480" y2="870" stroke="#2b6cb0" stroke-width="4"/>
+    <circle cx="700" cy="870" r="8" fill="#2b6cb0"/>
+    <rect x="110" y="800" width="370" height="230" rx="14" fill="#2b6cb0"/>
+    <text x="140" y="860" font-size="34" fill="#fff">縦書きテロップは</text>
+    <text x="140" y="910" font-size="34" fill="#fff">ここが定位置</text>
+    <text x="140" y="975" font-size="30" fill="#cfe3ff">右端から約250px</text>
+    <text x="140" y="1018" font-size="30" fill="#cfe3ff">(画面幅の2割)内側</text>
+  </g>
+
+  <!-- フッター注記 -->
+  <text x="540" y="2085" text-anchor="middle" font-size="30" fill="#666">1080×1920 基準/Instagramリール・YouTube Shorts・Pinterest 共通</text>
+</svg>
