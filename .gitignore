@@ -6,3 +6,7 @@ test.html
 *.py
 *.jpg
 *.png
+
+# 宣伝用の書き出し画像は管理対象にする
+!promotion/**/*.png
+!promotion/**/*.jpg
